@@ -1,0 +1,47 @@
+# Safe-MM-DPO training configuration
+#
+# 该配置对应 dev.md 中推荐的超参数，并补充了模型与数据路径。
+
+# =========================
+# Safe-MM-DPO 核心超参数
+# =========================
+λ_init: 1.0
+w: 0.5
+k: 0.5
+β_ori: 0.1
+
+learning_rate: 5e-7
+batch_size: 16
+kl_coeff: 0.1
+λ_lr: 0.01
+epochs: 2
+gradient_accumulation_steps: 4   # 有效 batch size = batch_size * grad_acc
+max_grad_norm: 1.0
+warmup_steps: 100
+
+# =========================
+# 模型路径
+# =========================
+# 策略模型与参考模型均初始化为同一个 Mistral-7B
+policy_model_path: models/base/Mistral-7B-v0.1
+ref_model_path: models/base/Mistral-7B-v0.1
+
+# Two reward models trained via train_rm.py
+helpful_rm_path: models/helpful_rm
+harmless_rm_path: models/harmless_rm
+
+# =========================
+# 数据路径
+# =========================
+train_helpful_path: data/train/helpful_pairs.jsonl
+train_harmless_path: data/train/harmless_pairs.jsonl
+val_helpful_path: data/val/helpful_pairs.jsonl
+val_harmless_path: data/val/harmless_pairs.jsonl
+
+# =========================
+# 其他选项（可按需扩展）
+# =========================
+save_steps: 500           # 可选：若实现按 step 保存
+eval_steps: 250           # 可选：若实现按 step 验证
+
+

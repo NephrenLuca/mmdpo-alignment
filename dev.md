@@ -314,17 +314,18 @@ python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.f
    - 标签：chosen=1, rejected=0（或使用相对排名）
 
 3. **训练配置**：
-   - 学习率：1e-5 到 5e-5
-   - 批次大小：16-32（根据GPU显存调整）
-   - 训练轮数：1-3个epoch
+   - 学习率：\(1\times10^{-5}\) 到 \(5\times10^{-5}\)
+   - 批次大小：16–32（根据GPU显存调整）
+   - 训练轮数：1–3个epoch
    - 使用AdamW优化器
-   - 应用梯度裁剪（max_grad_norm=1.0）
+   - 应用梯度裁剪（\(\text{max\_grad\_norm}=1.0\)）
 
 4. **损失函数**：
    - 使用对比损失（ranking loss）：
-     ```
-     loss = -log(sigmoid(score_chosen - score_rejected))
-     ```
+     
+     \[
+     \mathcal{L}_{\text{rank}} = -\log\!\big(\sigma(\text{score}_{\text{chosen}} - \text{score}_{\text{rejected}})\big)
+     \]
 
 5. **训练监控**：
    - 记录训练损失和验证损失
@@ -363,36 +364,52 @@ python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.f
 **每个训练步骤**：
 
 1. **前向传播**：
-   - 从批次中获取偏好对 `(x, y_w, y_l)`
-   - 使用策略模型计算 `π_θ(y_w|x)` 和 `π_θ(y_l|x)`
-   - 使用参考模型计算 `π_ref(y_w|x)` 和 `π_ref(y_l|x)`
+   - 从批次中获取偏好对 \((x, y_w, y_l)\)
+   - 使用策略模型计算 \(\pi_{\theta}(y_w \mid x)\) 和 \(\pi_{\theta}(y_l \mid x)\)
+   - 使用参考模型计算 \(\pi_{\text{ref}}(y_w \mid x)\) 和 \(\pi_{\text{ref}}(y_l \mid x)\)
 
 2. **计算奖励边际**：
-   - 使用Helpful-RM计算：`δ_H = R_helpful(y_w, x) - R_helpful(y_l, x)`
-   - 使用Harmless-RM计算：`δ_S = R_harmless(y_w, x) - R_harmless(y_l, x)`
+   - 使用Helpful-RM计算：\(\delta_H = R_{\text{helpful}}(y_w, x) - R_{\text{helpful}}(y_l, x)\)
+   - 使用Harmless-RM计算：\(\delta_S = R_{\text{harmless}}(y_w, x) - R_{\text{harmless}}(y_l, x)\)
 
 3. **动态缩放因子**：
-   - 计算 `β_H = β_ori * (1 + w * (1 - exp(-k * δ_H)))`
-   - 计算 `β_S = β_ori * (1 + w * (1 - exp(-k * δ_S)))`
+   - 计算：
+     
+     \[
+     \beta_H = \beta_{\text{ori}} \bigl(1 + w \left(1 - e^{-k \delta_H}\right)\bigr)
+     \]
+     
+   - 计算：
+     
+     \[
+     \beta_S = \beta_{\text{ori}} \bigl(1 + w \left(1 - e^{-k \delta_S}\right)\bigr)
+     \]
 
 4. **计算损失**：
-   - 帮助性损失 `L_H`：使用MM-DPO公式，应用 `β_H`
-   - 无害性损失 `L_S`：使用MM-DPO公式，应用 `β_S`
-   - 总损失：`L_Total = (1/(1+λ)) * L_H + (λ/(1+λ)) * L_S`
+   - 帮助性损失 \(\mathcal{L}_H\)：使用MM-DPO公式，应用 \(\beta_H\)
+   - 无害性损失 \(\mathcal{L}_S\)：使用MM-DPO公式，应用 \(\beta_S\)
+   - 总损失：
+     
+     \[
+     \mathcal{L}_{\text{Total}} = \frac{1}{1+\lambda}\,\mathcal{L}_H + \frac{\lambda}{1+\lambda}\,\mathcal{L}_S
+     \]
 
 5. **反向传播与更新**：
    - 计算梯度并更新策略模型参数
-   - 更新拉格朗日乘子 `λ`：
-     ```
-     λ = λ + λ_lr * (J_C - threshold)
-     ```
-     其中 `J_C` 是当前批次的有害性成本期望，`threshold=0`
+   - 更新拉格朗日乘子 \(\lambda\)：
+     
+     \[
+     \lambda \leftarrow \lambda + \lambda_{\text{lr}}\,(J_C - \text{threshold})
+     \]
+     
+     其中 \(J_C\) 是当前批次的有害性成本期望，\(\text{threshold}=0\)。
 
 6. **KL散度约束**（可选）：
    - 添加KL散度项防止策略偏离参考模型过远：
-     ```
-     L_KL = kl_coeff * KL(π_θ || π_ref)
-     ```
+     
+     \[
+     \mathcal{L}_{\text{KL}} = \text{kl\_coeff} \cdot \mathrm{KL}\bigl(\pi_{\theta} \,\|\, \pi_{\text{ref}}\bigr)
+     \]
 
 #### 5.2.3 训练配置
 

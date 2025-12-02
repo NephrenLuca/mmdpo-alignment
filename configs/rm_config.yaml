@@ -1,0 +1,32 @@
+# Reward model training configuration
+#
+# 用于训练 Helpful-RM 与 Harmless-RM，两者共用同一个基础配置，
+# 通过命令行参数 --task 控制具体任务。
+
+# =========================
+# Base model & tokenizer
+# =========================
+base_model_path: models/base/Mistral-7B-v0.1
+tokenizer_name: null     # 默认使用 base_model_path
+max_length: 1024
+
+# =========================
+# Data paths
+# =========================
+# 这些路径由 src/scripts/prepare_data.py 生成
+train_helpful_path: data/train/helpful_pairs.jsonl
+val_helpful_path: data/val/helpful_pairs.jsonl
+
+train_harmless_path: data/train/harmless_pairs.jsonl
+val_harmless_path: data/val/harmless_pairs.jsonl
+
+# =========================
+# Training hyper-parameters
+# =========================
+learning_rate: 2e-5      # 建议在 1e-5 ~ 5e-5 之间
+batch_size: 8            # 根据显存调整
+num_epochs: 1            # 初次跑通建议 1 epoch
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+
