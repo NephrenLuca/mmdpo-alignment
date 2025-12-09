@@ -115,8 +115,7 @@ mkdir -p models/base
 ```bash
 pip install huggingface_hub
 
-huggingface-cli download mistralai/Mistral-7B-v0.1 \
-    --local-dir models/base/Mistral-7B-v0.1
+huggingface-cli download mistralai/Mistral-7B-v0.1 --local-dir models/base/Mistral-7B-v0.1
 ```
 
 ### 2.3 使用 Python 代码下载（可选）
@@ -159,14 +158,66 @@ cd ..
 
 ### 3.2 整理原始数据到 `data/raw`
 
-具体数据文件路径需根据 `safe-rlhf` 仓库实际结构调整，以下为示意：
+PKU-SafeRLHF 数据集托管在 Hugging Face 上，需要从 Hugging Face 下载。数据包含有帮助性（helpful）和无害性（harmless）两个维度的偏好标注。
+
+#### 方法一：使用 Python 脚本下载（推荐）
+
+**重要**：请确保已激活 conda 环境（如 `humanAlignment`）或虚拟环境，并已安装依赖（见 1.3 节）。
 
 ```bash
-mkdir -p data/raw
+# 激活环境（如果使用 conda）
+conda activate humanAlignment
 
-# 示例：将 BeaverTails 相关数据复制到 raw 目录
-cp data/safe-rlhf/path/to/beavertails_*.jsonl data/raw/
+# 或激活虚拟环境（如果使用 venv）
+# source venv/bin/activate
+
+# 确保已安装依赖（datasets 和 huggingface_hub 通常在 requirements.txt 中）
+pip install datasets huggingface_hub
+
+# 运行下载脚本
+python scripts/download_safe_rlhf_data.py --output_dir data/raw --splits train test
 ```
+
+脚本会从 Hugging Face 下载 `PKU-Alignment/PKU-SafeRLHF` 数据集，并保存为 JSONL 格式到 `data/raw` 目录。
+
+> **提示**：如果完整数据集下载失败，脚本会自动尝试下载较小的子集（PKU-SafeRLHF-30K 或 PKU-SafeRLHF-10K）。
+
+#### 方法二：使用 Hugging Face CLI 下载
+
+```bash
+# 激活环境
+conda activate humanAlignment  # 或 source venv/bin/activate
+
+# 安装 huggingface_hub（如果未安装）
+pip install huggingface_hub
+
+# 使用 CLI 下载数据集
+huggingface-cli download PKU-Alignment/PKU-SafeRLHF --repo-type dataset --local-dir data/raw/pku_saferlhf
+```
+
+#### 验证下载结果
+
+下载完成后，检查 `data/raw` 目录：
+
+```bash
+ls -lh data/raw/
+```
+
+应看到以下文件：
+- `pku_saferlhf_train.jsonl`（训练集）
+- `pku_saferlhf_test.jsonl`（测试集）
+
+可以快速检查数据格式：
+
+```bash
+head -n 1 data/raw/pku_saferlhf_train.jsonl | python3 -m json.tool
+```
+
+> **注意**：如果完整数据集下载失败（可能因为网络或权限问题），可以尝试下载较小的子集：
+> - `PKU-Alignment/PKU-SafeRLHF-30K`（30K 样本）
+> - `PKU-Alignment/PKU-SafeRLHF-10K`（10K 样本）
+> 
+> 修改脚本中的 `--dataset` 参数即可。
 
 ### 3.3 运行预处理脚本，生成偏好对与数据集划分
 
