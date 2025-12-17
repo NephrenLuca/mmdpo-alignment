@@ -60,13 +60,23 @@ def load_reward_model(cfg: RewardModelConfig) -> tuple[RewardModel, PreTrainedTo
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     if tokenizer.pad_token is None:
-        # For decoder-only LMs we often need to set pad_token explicitly
+        # For decoder-only LMs (e.g. Mistral) we usually don't have a pad token
+        # defined by default. Reuse EOS as PAD so that:
+        #   - our DataLoader can pad sequences (see train_rm.collate_fn)
+        #   - HuggingFace internals (SequenceSummary etc.) know pad_token_id
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Make sure the model itself also has pad_token_id set, otherwise some
+    # transformer utilities will raise when batch_size > 1.
     base_model = AutoModelForSequenceClassification.from_pretrained(
         cfg.base_model_path,
         num_labels=1,
+        pad_token_id=tokenizer.pad_token_id,
     )
+    # Double‑check on the loaded config as well.
+    if base_model.config.pad_token_id is None:
+        base_model.config.pad_token_id = tokenizer.pad_token_id
+
     model = RewardModel(base_model)
     return model, tokenizer
 
