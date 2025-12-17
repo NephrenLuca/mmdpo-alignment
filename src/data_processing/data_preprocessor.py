@@ -59,24 +59,60 @@ def build_preference_pairs(
     dimension: str,
 ) -> List[PreferenceRecord]:
     """
-    Convert raw BeaverTails-style records into preference pairs.
+    Convert raw BeaverTails / PKU-SafeRLHF-style records into preference pairs.
 
-    Expected raw fields (may need to adapt to your actual schema):
-    - 'prompt'
-    - 'response_chosen'
-    - 'response_rejected'
-    - 'helpful_label' / 'harmless_label' or similar
+    We support两种常见格式：
 
-    For now, we assume the raw data已经是偏好形式 (chosen/rejected 已给出)，
-    因此这里只是做一个字段规范化的封装。
+    1）已预先构造好的偏好对（通用 Beavertails 形式）：
+        - 'prompt'
+        - 'response_chosen'
+        - 'response_rejected'
+
+    2）PKU-SafeRLHF 形式（如 Alpaca-7B / Alpaca2-7B / Alpaca3-8B）：
+        - 'prompt'
+        - 'response_0', 'response_1'
+        - 'better_response_id'   （helpful 维度）
+        - 'safer_response_id'    （harmless 维度）
+
+    对于（2），我们根据 `dimension` 选择使用哪一个 id 字段：
+        - dimension == "helpful"  -> better_response_id
+        - dimension == "harmless" -> safer_response_id
     """
     out: List[PreferenceRecord] = []
     for rec in records:
         prompt = rec.get("prompt")
-        chosen = rec.get("response_chosen")
-        rejected = rec.get("response_rejected")
-        if not prompt or chosen is None or rejected is None:
-            # Skip malformed records
+        if not prompt:
+            continue
+
+        # 情况 1：通用 Beavertails 格式（已经给出 chosen/rejected）
+        if "response_chosen" in rec and "response_rejected" in rec:
+            chosen = rec.get("response_chosen")
+            rejected = rec.get("response_rejected")
+            if chosen is None or rejected is None:
+                continue
+
+        # 情况 2：PKU-SafeRLHF 格式，利用 *_response_id 进行构造
+        elif "response_0" in rec and "response_1" in rec:
+            if dimension == "helpful":
+                id_key = "better_response_id"
+            elif dimension == "harmless":
+                id_key = "safer_response_id"
+            else:
+                # 未知维度，直接跳过
+                continue
+
+            idx = rec.get(id_key)
+            if idx not in (0, 1):
+                # 缺少偏好标签或格式不对，跳过
+                continue
+
+            chosen = rec.get(f"response_{idx}")
+            rejected = rec.get(f"response_{1 - idx}")
+            if chosen is None or rejected is None:
+                continue
+
+        # 其它未知格式：暂时跳过
+        else:
             continue
 
         out.append(

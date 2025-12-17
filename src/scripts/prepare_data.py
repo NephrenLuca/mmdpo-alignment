@@ -62,12 +62,15 @@ def run(
     )
 
     # Helpful dimension
-    helpful_raw = _gather_records(input_dir, pattern="*helpful*.jsonl")
+    # 对 PKU-SafeRLHF，我们直接遍历 input_dir 下所有 jsonl，
+    # 再在 build_preference_pairs 中根据 better_response_id 构造偏好对。
+    helpful_raw = _gather_records(input_dir, pattern="**/*.jsonl")
     helpful_pairs = build_preference_pairs(helpful_raw, dimension="helpful")
     h_train, h_val, h_test = split_dataset(helpful_pairs, split_cfg, seed=seed)
 
     # Harmless / safety dimension
-    harmless_raw = _gather_records(input_dir, pattern="*harmless*.jsonl")
+    # 同样使用全部 jsonl，由 build_preference_pairs 基于 safer_response_id 进行构造。
+    harmless_raw = _gather_records(input_dir, pattern="**/*.jsonl")
     harmless_pairs = build_preference_pairs(harmless_raw, dimension="harmless")
     s_train, s_val, s_test = split_dataset(harmless_pairs, split_cfg, seed=seed)
 

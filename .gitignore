@@ -1,3 +1,3 @@
-# Ignore models folder
 models/
-
+data/
+data.tar.gz
