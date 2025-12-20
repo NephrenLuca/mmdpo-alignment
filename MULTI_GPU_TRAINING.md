@@ -51,6 +51,18 @@ torchrun --nproc_per_node=8 --master_port=29501 \
     --logging_dir logs/training/safe_mm_dpo
 ```
 
+**注意**：DPO训练现在支持LoRA，强烈建议在配置文件中启用：
+
+```yaml
+use_lora: true
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.1
+```
+
+详细说明请查看 [DPO_LORA_GUIDE.md](DPO_LORA_GUIDE.md)
+
 ## 工作原理
 
 ### 分布式训练机制
@@ -90,13 +102,29 @@ learning_rate: 2e-5      # 可能需要根据有效batch size调整
 
 ### DPO 训练配置 (dpo_config.yaml)
 
-对于 8×64GB GPU 的配置建议：
+对于 8×64GB GPU 的配置建议（使用LoRA）：
 
 ```yaml
-batch_size: 2-4          # 每个GPU的batch size（DPO需要更多显存）
+use_lora: true           # 强烈推荐启用LoRA
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.1
+batch_size: 2-4          # 每个GPU的batch size
 gradient_accumulation_steps: 4-8  # 通过梯度累积增加有效batch size
-learning_rate: 5e-7      # 保持原有学习率，梯度累积会自然增加有效batch
+learning_rate: 5e-7      # 使用LoRA时可提高到1e-6或2e-6
 ```
+
+**预期显存占用**（使用LoRA）：
+- 策略模型（bf16）：~14GB（只加载，大部分不训练）
+- 优化器状态（fp32）：~0.2GB（只训练LoRA参数）✅
+- 梯度（bf16）：~0.2GB ✅
+- 参考模型（bf16）：~14GB
+- 2个RM（bf16）：~28GB
+- 激活值：~5-10GB
+- **总计：~55-65GB** ✅
+
+**如果不使用LoRA，显存占用会超过100GB，不推荐！**
 
 ## 单GPU训练（向后兼容）
 

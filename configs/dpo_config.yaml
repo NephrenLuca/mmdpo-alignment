@@ -10,12 +10,12 @@ w: 0.5
 k: 0.5
 β_ori: 0.1
 
-learning_rate: 5e-7
-batch_size: 16
+learning_rate: 5e-7      # 使用LoRA时可提高到1e-6或2e-6
+batch_size: 4            # LoRA模式下可以使用较小的batch_size（8x64GB GPU建议2-4）
 kl_coeff: 0.1
 λ_lr: 0.01
 epochs: 2
-gradient_accumulation_steps: 4   # 有效 batch size = batch_size * grad_acc
+gradient_accumulation_steps: 4   # 有效 batch size = batch_size * grad_acc * num_gpus
 max_grad_norm: 1.0
 warmup_steps: 100
 
@@ -37,6 +37,16 @@ train_helpful_path: data/train/helpful_pairs.jsonl
 train_harmless_path: data/train/harmless_pairs.jsonl
 val_helpful_path: data/val/helpful_pairs.jsonl
 val_harmless_path: data/val/harmless_pairs.jsonl
+
+# =========================
+# LoRA配置（参数高效微调）
+# =========================
+use_lora: true           # 启用LoRA以大幅降低显存占用（强烈推荐）
+lora:
+  r: 16                  # LoRA rank，控制可训练参数数量
+  alpha: 32              # LoRA alpha，通常设为r的2倍
+  dropout: 0.1           # LoRA dropout
+  # target_modules: null  # 可选：指定要应用LoRA的模块，null时使用默认值（适用于Mistral）
 
 # =========================
 # 其他选项（可按需扩展）

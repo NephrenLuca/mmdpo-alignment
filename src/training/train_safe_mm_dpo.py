@@ -40,6 +40,15 @@ from transformers import (
 )
 import yaml
 
+try:
+    from peft import LoraConfig, get_peft_model, TaskType
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
+    LoraConfig = None
+    get_peft_model = None
+    TaskType = None
+
 from src.models.reward_model import load_reward_model, RewardModelConfig
 
 
@@ -139,10 +148,21 @@ class DPOConfig:
     val_helpful_path: Path
     val_harmless_path: Path
 
+    # LoRA configuration
+    use_lora: bool = False
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.1
+    lora_target_modules: list[str] | None = None
+
 
 def load_dpo_config(path: Path) -> DPOConfig:
     with path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+
+    # Handle LoRA config
+    use_lora = cfg.get("use_lora", False)
+    lora_config = cfg.get("lora", {}) if use_lora else {}
 
     return DPOConfig(
         λ_init=float(cfg["λ_init"]),
@@ -165,6 +185,11 @@ def load_dpo_config(path: Path) -> DPOConfig:
         train_harmless_path=Path(cfg["train_harmless_path"]),
         val_helpful_path=Path(cfg["val_helpful_path"]),
         val_harmless_path=Path(cfg["val_harmless_path"]),
+        use_lora=use_lora,
+        lora_r=int(lora_config.get("r", 16)),
+        lora_alpha=int(lora_config.get("alpha", 32)),
+        lora_dropout=float(lora_config.get("dropout", 0.1)),
+        lora_target_modules=lora_config.get("target_modules"),
     )
 
 
@@ -320,9 +345,48 @@ def run_training(
         policy_model.gradient_checkpointing_enable()
     policy_model.config.use_cache = False
 
+    # Apply LoRA to policy model if requested
+    if cfg.use_lora:
+        if not PEFT_AVAILABLE:
+            raise ImportError(
+                "LoRA requested but peft is not installed. "
+                "Install it with: pip install peft"
+            )
+        
+        # Default target modules for Mistral/Llama architectures
+        target_modules = cfg.lora_target_modules
+        if target_modules is None:
+            # For Mistral, typical target modules are q_proj, k_proj, v_proj, o_proj
+            # Also include gate_proj, up_proj, down_proj in MLP layers
+            target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,  # Causal language modeling task
+            r=cfg.lora_r,
+            lora_alpha=cfg.lora_alpha,
+            lora_dropout=cfg.lora_dropout,
+            target_modules=target_modules,
+            bias="none",  # Don't train bias parameters
+        )
+        policy_model = get_peft_model(policy_model, lora_config)
+        
+        # Print trainable parameters info
+        if (not is_ddp) or rank == 0:
+            trainable_params = sum(p.numel() for p in policy_model.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in policy_model.parameters())
+            print(f"LoRA enabled for policy model: {trainable_params:,} trainable / {total_params:,} total parameters "
+                  f"({100 * trainable_params / total_params:.2f}%)")
+
     # Wrap policy model with DDP (only trainable model needs DDP)
     if is_ddp:
         policy_model = DDP(policy_model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+    
+    # Clear cache before training starts
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        if (not is_ddp) or rank == 0:
+            print(f"GPU memory allocated: {torch.cuda.memory_allocated(device) / 1e9:.2f} GB")
+            print(f"GPU memory reserved: {torch.cuda.memory_reserved(device) / 1e9:.2f} GB")
 
     # ====== 加载两个奖励模型（双评判员）======
     helpful_rm_cfg = RewardModelConfig(
