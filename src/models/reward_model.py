@@ -49,12 +49,18 @@ class RewardModel(nn.Module):
         return logits
 
 
-def load_reward_model(cfg: RewardModelConfig) -> tuple[RewardModel, PreTrainedTokenizerBase]:
+def load_reward_model(
+    cfg: RewardModelConfig,
+    torch_dtype: Optional[torch.dtype] = None,
+    use_gradient_checkpointing: bool = True,
+) -> tuple[RewardModel, PreTrainedTokenizerBase]:
     """
     Load base model and tokenizer and wrap as a RewardModel.
 
     - base_model_path: path or HF id for the base LM
     - tokenizer_name: optional, if None we reuse base_model_path
+    - torch_dtype: optional dtype for model weights (e.g., torch.bfloat16)
+    - use_gradient_checkpointing: enable gradient checkpointing to save memory
     """
     tokenizer_name = cfg.tokenizer_name or cfg.base_model_path
 
@@ -66,16 +72,35 @@ def load_reward_model(cfg: RewardModelConfig) -> tuple[RewardModel, PreTrainedTo
         #   - HuggingFace internals (SequenceSummary etc.) know pad_token_id
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Auto-select dtype for memory efficiency if not specified
+    if torch_dtype is None and torch.cuda.is_available():
+        if torch.cuda.is_bf16_supported():
+            torch_dtype = torch.bfloat16
+        else:
+            torch_dtype = torch.float16
+
     # Make sure the model itself also has pad_token_id set, otherwise some
     # transformer utilities will raise when batch_size > 1.
+    load_kwargs = {
+        "num_labels": 1,
+        "pad_token_id": tokenizer.pad_token_id,
+    }
+    if torch_dtype is not None:
+        load_kwargs["torch_dtype"] = torch_dtype
+
     base_model = AutoModelForSequenceClassification.from_pretrained(
         cfg.base_model_path,
-        num_labels=1,
-        pad_token_id=tokenizer.pad_token_id,
+        **load_kwargs,
     )
     # Double‑check on the loaded config as well.
     if base_model.config.pad_token_id is None:
         base_model.config.pad_token_id = tokenizer.pad_token_id
+
+    # Enable gradient checkpointing for memory efficiency
+    if use_gradient_checkpointing:
+        base_model.config.use_cache = False
+        if hasattr(base_model, "gradient_checkpointing_enable"):
+            base_model.gradient_checkpointing_enable()
 
     model = RewardModel(base_model)
     return model, tokenizer

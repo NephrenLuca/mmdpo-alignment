@@ -23,13 +23,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import torch
+import torch.distributed as dist
 from torch import nn
-from torch.utils.data import Dataset, DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -176,7 +179,9 @@ def compute_log_probs(
     为简化实现，我们直接对整个序列（包括 prompt）求平均 log-prob。
     理论上 DPO 只需要响应部分，但在大多数实践中这种近似是可接受的。
     """
-    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    # Handle DDP-wrapped models
+    model_for_forward = model.module if isinstance(model, DDP) else model
+    outputs = model_for_forward(input_ids=input_ids, attention_mask=attention_mask)
     logits = outputs.logits  # (B, T, V)
     log_probs = torch.log_softmax(logits, dim=-1)
 
@@ -222,9 +227,11 @@ def kl_divergence(
     """
     近似 KL(π_θ || π_ref)，在一个 batch 上做经验估计。
     """
+    # Handle DDP-wrapped policy model
+    policy_for_forward = policy.module if isinstance(policy, DDP) else policy
     with torch.no_grad():
         ref_logits = ref(input_ids=input_ids, attention_mask=attention_mask).logits
-    pi_logits = policy(input_ids=input_ids, attention_mask=attention_mask).logits
+    pi_logits = policy_for_forward(input_ids=input_ids, attention_mask=attention_mask).logits
 
     pi_logp = torch.log_softmax(pi_logits, dim=-1)
     ref_logp = torch.log_softmax(ref_logits, dim=-1)
@@ -246,26 +253,76 @@ def dynamic_beta(β_ori: float, w: float, k: float, delta: torch.Tensor) -> torc
     return β_ori * (1.0 + w * (1.0 - torch.exp(-k * delta)))
 
 
+def setup_distributed():
+    """Initialize distributed training environment."""
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    else:
+        # Not in distributed mode
+        return None, None, None
+
+    dist.init_process_group(backend="nccl")
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
+    return rank, world_size, device
+
+
+def cleanup_distributed():
+    """Clean up distributed training environment."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
 def run_training(
     cfg: DPOConfig,
     output_dir: Path,
     logging_dir: Path,
 ) -> None:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Setup distributed training if available
+    rank, world_size, ddp_device = setup_distributed()
+    is_ddp = rank is not None
+    local_rank = int(os.environ.get("LOCAL_RANK", 0)) if is_ddp else 0
+
+    if is_ddp:
+        device = ddp_device
+        if rank == 0:
+            print(f"Distributed training initialized: world_size={world_size}")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Single GPU training on device: {device}")
 
     # ====== 加载策略模型与参考模型 ======
     tokenizer = AutoTokenizer.from_pretrained(cfg.policy_model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    policy_model = AutoModelForCausalLM.from_pretrained(cfg.policy_model_path)
-    ref_model = AutoModelForCausalLM.from_pretrained(cfg.ref_model_path)
+    # Load models with memory optimizations
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    policy_model = AutoModelForCausalLM.from_pretrained(
+        cfg.policy_model_path,
+        torch_dtype=dtype,
+    )
+    ref_model = AutoModelForCausalLM.from_pretrained(
+        cfg.ref_model_path,
+        torch_dtype=dtype,
+    )
     ref_model.eval()
     for p in ref_model.parameters():
         p.requires_grad = False
 
     policy_model.to(device)
     ref_model.to(device)
+
+    # Enable gradient checkpointing for policy model
+    if hasattr(policy_model, "gradient_checkpointing_enable"):
+        policy_model.gradient_checkpointing_enable()
+    policy_model.config.use_cache = False
+
+    # Wrap policy model with DDP (only trainable model needs DDP)
+    if is_ddp:
+        policy_model = DDP(policy_model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
 
     # ====== 加载两个奖励模型（双评判员）======
     helpful_rm_cfg = RewardModelConfig(
@@ -278,8 +335,8 @@ def run_training(
         tokenizer_name=cfg.harmless_rm_path,
         max_length=tokenizer.model_max_length,
     )
-    helpful_rm, _ = load_reward_model(helpful_rm_cfg)
-    harmless_rm, _ = load_reward_model(harmless_rm_cfg)
+    helpful_rm, _ = load_reward_model(helpful_rm_cfg, torch_dtype=dtype, use_gradient_checkpointing=False)
+    harmless_rm, _ = load_reward_model(harmless_rm_cfg, torch_dtype=dtype, use_gradient_checkpointing=False)
     helpful_rm.to(device).eval()
     harmless_rm.to(device).eval()
     for p in helpful_rm.parameters():
@@ -302,14 +359,27 @@ def run_training(
 
     train_ds = CombinedDataset(train_records, tokenizer, tokenizer.model_max_length)
 
+    # Use DistributedSampler for multi-GPU training
+    train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank) if is_ddp else None
+
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         collate_fn=collate_fn(tokenizer),
+        pin_memory=True,
     )
 
-    optimizer = torch.optim.AdamW(policy_model.parameters(), lr=cfg.learning_rate)
+    # Adjust effective batch size info
+    effective_batch_size = cfg.batch_size * cfg.gradient_accumulation_steps * (world_size if is_ddp else 1)
+    if (not is_ddp) or rank == 0:
+        print(f"Effective batch size: {effective_batch_size} (batch_size={cfg.batch_size} x accumulation={cfg.gradient_accumulation_steps} x {world_size if is_ddp else 1} GPUs)")
+
+    optimizer = torch.optim.AdamW(
+        policy_model.parameters(),
+        lr=cfg.learning_rate,
+    )
     num_training_steps = len(train_loader) * cfg.epochs
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
@@ -320,12 +390,16 @@ def run_training(
     # 拉格朗日乘子 λ（核心：动态平衡 helpful 与 harmless 损失）
     lambda_param = torch.tensor(cfg.λ_init, device=device)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    logging_dir.mkdir(parents=True, exist_ok=True)
+    if (not is_ddp) or rank == 0:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logging_dir.mkdir(parents=True, exist_ok=True)
 
     global_step = 0
 
     for epoch in range(1, cfg.epochs + 1):
+        if is_ddp:
+            train_sampler.set_epoch(epoch)
+
         policy_model.train()
         for step, batch in enumerate(train_loader, start=1):
             global_step += 1
@@ -379,7 +453,9 @@ def run_training(
             loss_total.backward()
 
             if step % cfg.gradient_accumulation_steps == 0:
-                torch.nn.utils.clip_grad_norm_(policy_model.parameters(), cfg.max_grad_norm)
+                # For DDP, we can directly use model.parameters()
+                model_params = policy_model.module.parameters() if is_ddp else policy_model.parameters()
+                torch.nn.utils.clip_grad_norm_(model_params, cfg.max_grad_norm)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
@@ -391,19 +467,24 @@ def run_training(
                     lambda_param = lambda_param + cfg.λ_lr * (J_C - 0.0)
                     lambda_param = lambda_param.clamp(min=0.0)  # λ >= 0
 
-                if global_step % 10 == 0:
+                if (not is_ddp or rank == 0) and global_step % 10 == 0:
                     print(
                         f"Epoch {epoch} step {global_step} "
                         f"loss_H={loss_H.item():.4f} loss_S={loss_S.item():.4f} "
                         f"KL={kl.item():.4f} lambda={lambda_param.item():.4f}"
                     )
 
-        # 一个 epoch 结束后保存 checkpoint
-        save_dir = output_dir / f"epoch_{epoch}"
-        save_dir.mkdir(parents=True, exist_ok=True)
-        policy_model.save_pretrained(save_dir)
-        tokenizer.save_pretrained(save_dir)
-        print(f"Saved epoch {epoch} checkpoint to {save_dir}")
+        # 一个 epoch 结束后保存 checkpoint (only on rank 0)
+        if (not is_ddp) or rank == 0:
+            save_dir = output_dir / f"epoch_{epoch}"
+            save_dir.mkdir(parents=True, exist_ok=True)
+            # Unwrap DDP model for saving
+            model_to_save = policy_model.module if is_ddp else policy_model
+            model_to_save.save_pretrained(save_dir)
+            tokenizer.save_pretrained(save_dir)
+            print(f"Saved epoch {epoch} checkpoint to {save_dir}")
+
+    cleanup_distributed()
 
 
 def main() -> None:

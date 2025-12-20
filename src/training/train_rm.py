@@ -37,13 +37,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
 import torch
+import torch.distributed as dist
 from torch import nn
-from torch.utils.data import Dataset, DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from transformers import DataCollatorWithPadding, get_linear_schedule_with_warmup
 import yaml
 
@@ -178,6 +181,8 @@ def train_one_epoch(
     scheduler,
     device: torch.device,
     max_grad_norm: float,
+    is_ddp: bool = False,
+    local_rank: int = 0,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -192,14 +197,18 @@ def train_one_epoch(
         input_ids_r = rejected["input_ids"].to(device)
         attn_mask_r = rejected["attention_mask"].to(device)
 
-        scores_c = model(input_ids=input_ids_c, attention_mask=attn_mask_c)
-        scores_r = model(input_ids=input_ids_r, attention_mask=attn_mask_r)
+        # Get the actual model if wrapped in DDP
+        model_for_forward = model.module if is_ddp else model
+        scores_c = model_for_forward(input_ids=input_ids_c, attention_mask=attn_mask_c)
+        scores_r = model_for_forward(input_ids=input_ids_r, attention_mask=attn_mask_r)
 
         loss = preference_loss(scores_c, scores_r)
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        # For DDP, we can directly use model.parameters()
+        model_params = model.module.parameters() if is_ddp else model.parameters()
+        torch.nn.utils.clip_grad_norm_(model_params, max_grad_norm)
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
@@ -207,7 +216,14 @@ def train_one_epoch(
         total_loss += loss.item()
         total_steps += 1
 
-    return total_loss / max(1, total_steps)
+    # Average loss across all processes if using DDP
+    if is_ddp:
+        dist.all_reduce(torch.tensor(total_loss, device=device), op=dist.ReduceOp.SUM)
+        dist.all_reduce(torch.tensor(total_steps, device=device), op=dist.ReduceOp.SUM)
+        total_loss = total_loss / dist.get_world_size()
+        total_steps = total_steps / dist.get_world_size()
+
+    return total_loss / max(1, int(total_steps))
 
 
 @torch.no_grad()
@@ -215,12 +231,15 @@ def evaluate(
     model: nn.Module,
     dataloader: DataLoader,
     device: torch.device,
+    is_ddp: bool = False,
 ) -> Dict[str, float]:
     model.eval()
     total_loss = 0.0
     total_steps = 0
     correct = 0
     total_pairs = 0
+
+    model_for_forward = model.module if is_ddp else model
 
     for batch in dataloader:
         chosen = batch["chosen"]
@@ -231,8 +250,8 @@ def evaluate(
         input_ids_r = rejected["input_ids"].to(device)
         attn_mask_r = rejected["attention_mask"].to(device)
 
-        scores_c = model(input_ids=input_ids_c, attention_mask=attn_mask_c)
-        scores_r = model(input_ids=input_ids_r, attention_mask=attn_mask_r)
+        scores_c = model_for_forward(input_ids=input_ids_c, attention_mask=attn_mask_c)
+        scores_r = model_for_forward(input_ids=input_ids_r, attention_mask=attn_mask_r)
 
         loss = preference_loss(scores_c, scores_r)
 
@@ -242,10 +261,38 @@ def evaluate(
         correct += (scores_c > scores_r).sum().item()
         total_pairs += scores_c.numel()
 
+    # Gather metrics from all processes if using DDP
+    if is_ddp:
+        metrics_tensor = torch.tensor([total_loss, total_steps, correct, total_pairs], device=device, dtype=torch.float32)
+        dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+        total_loss, total_steps, correct, total_pairs = metrics_tensor.tolist()
+
     return {
-        "val_loss": total_loss / max(1, total_steps),
-        "val_accuracy": correct / max(1, total_pairs),
+        "val_loss": total_loss / max(1, int(total_steps)),
+        "val_accuracy": correct / max(1, int(total_pairs)),
     }
+
+
+def setup_distributed():
+    """Initialize distributed training environment."""
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    else:
+        # Not in distributed mode
+        return None, None, None
+
+    dist.init_process_group(backend="nccl")
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
+    return rank, world_size, device
+
+
+def cleanup_distributed():
+    """Clean up distributed training environment."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def main() -> None:
@@ -270,17 +317,38 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    train_cfg = load_train_config(args.config, args.task)
+    # Setup distributed training if available
+    rank, world_size, ddp_device = setup_distributed()
+    is_ddp = rank is not None
+    local_rank = int(os.environ.get("LOCAL_RANK", 0)) if is_ddp else 0
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if is_ddp:
+        device = ddp_device
+        if rank == 0:
+            print(f"Distributed training initialized: world_size={world_size}")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Single GPU training on device: {device}")
+
+    train_cfg = load_train_config(args.config, args.task)
 
     rm_cfg = RewardModelConfig(
         base_model_path=train_cfg.base_model_path,
         tokenizer_name=train_cfg.tokenizer_name,
         max_length=train_cfg.max_length,
     )
-    model, tokenizer = load_reward_model(rm_cfg)
+    
+    # Load model with memory optimizations
+    model, tokenizer = load_reward_model(
+        rm_cfg,
+        torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+        use_gradient_checkpointing=True,
+    )
     model.to(device)
+
+    # Wrap model with DDP if using distributed training
+    if is_ddp:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
 
     train_ds = PreferenceDataset(train_cfg.train_path, tokenizer, train_cfg.max_length)
     val_ds = PreferenceDataset(train_cfg.val_path, tokenizer, train_cfg.max_length)
@@ -306,18 +374,31 @@ def main() -> None:
             "rejected": stack_side("rejected"),
         }
 
+    # Use DistributedSampler for multi-GPU training
+    train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank) if is_ddp else None
+    val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False) if is_ddp else None
+
     train_loader = DataLoader(
         train_ds,
         batch_size=train_cfg.batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         collate_fn=collate_fn,
+        pin_memory=True,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=train_cfg.batch_size,
         shuffle=False,
+        sampler=val_sampler,
         collate_fn=collate_fn,
+        pin_memory=True,
     )
+
+    # Adjust learning rate for distributed training (effective batch size increases)
+    effective_batch_size = train_cfg.batch_size * (world_size if is_ddp else 1)
+    if is_ddp and rank == 0:
+        print(f"Effective batch size: {effective_batch_size} (local batch_size={train_cfg.batch_size} x {world_size} GPUs)")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -333,9 +414,13 @@ def main() -> None:
     )
 
     best_val_loss = float("inf")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    if (not is_ddp) or rank == 0:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, train_cfg.num_epochs + 1):
+        if is_ddp:
+            train_sampler.set_epoch(epoch)
+
         train_loss = train_one_epoch(
             model,
             train_loader,
@@ -343,23 +428,30 @@ def main() -> None:
             scheduler,
             device,
             train_cfg.max_grad_norm,
+            is_ddp=is_ddp,
+            local_rank=local_rank,
         )
-        metrics = evaluate(model, val_loader, device)
+        metrics = evaluate(model, val_loader, device, is_ddp=is_ddp)
 
-        print(
-            f"[{args.task}] Epoch {epoch}/{train_cfg.num_epochs} "
-            f"train_loss={train_loss:.4f} "
-            f"val_loss={metrics['val_loss']:.4f} "
-            f"val_acc={metrics['val_accuracy']:.4f}"
-        )
+        if (not is_ddp) or rank == 0:
+            print(
+                f"[{args.task}] Epoch {epoch}/{train_cfg.num_epochs} "
+                f"train_loss={train_loss:.4f} "
+                f"val_loss={metrics['val_loss']:.4f} "
+                f"val_acc={metrics['val_accuracy']:.4f}"
+            )
 
-        # Save best checkpoint
-        if metrics["val_loss"] < best_val_loss:
+        # Save best checkpoint (only on rank 0)
+        if ((not is_ddp) or rank == 0) and metrics["val_loss"] < best_val_loss:
             best_val_loss = metrics["val_loss"]
             save_dir = args.output_dir
             print(f"Saving best model to {save_dir} (val_loss={best_val_loss:.4f})")
-            model.model.save_pretrained(save_dir)
+            # Unwrap DDP model for saving
+            model_to_save = model.module if is_ddp else model
+            model_to_save.model.save_pretrained(save_dir)
             tokenizer.save_pretrained(save_dir)
+
+    cleanup_distributed()
 
 
 if __name__ == "__main__":
