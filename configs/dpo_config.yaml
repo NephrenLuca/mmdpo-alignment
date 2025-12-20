@@ -12,6 +12,7 @@ k: 0.5
 
 learning_rate: 5e-7      # 使用LoRA时可提高到1e-6或2e-6
 batch_size: 4            # LoRA模式下可以使用较小的batch_size（8x64GB GPU建议2-4）
+max_length: 512          # 序列最大长度，根据显存调整（8x64GB GPU建议384-512）
 kl_coeff: 0.1
 λ_lr: 0.01
 epochs: 2

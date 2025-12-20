@@ -137,6 +137,7 @@ class DPOConfig:
     gradient_accumulation_steps: int
     max_grad_norm: float
     warmup_steps: int
+    max_length: int  # Maximum sequence length for tokenization
 
     policy_model_path: str
     ref_model_path: str
@@ -164,6 +165,12 @@ def load_dpo_config(path: Path) -> DPOConfig:
     use_lora = cfg.get("use_lora", False)
     lora_config = cfg.get("lora", {}) if use_lora else {}
 
+    # Get max_length from config, with a safe default
+    max_length = cfg.get("max_length", 512)
+    if max_length is None or max_length > 32767:  # Safe limit for tokenizer
+        max_length = 512
+        print(f"Warning: max_length in config is invalid or too large, using default {max_length}")
+
     return DPOConfig(
         λ_init=float(cfg["λ_init"]),
         w=float(cfg["w"]),
@@ -177,6 +184,7 @@ def load_dpo_config(path: Path) -> DPOConfig:
         gradient_accumulation_steps=int(cfg.get("gradient_accumulation_steps", 1)),
         max_grad_norm=float(cfg.get("max_grad_norm", 1.0)),
         warmup_steps=int(cfg.get("warmup_steps", 0)),
+        max_length=int(max_length),
         policy_model_path=cfg["policy_model_path"],
         ref_model_path=cfg["ref_model_path"],
         helpful_rm_path=cfg["helpful_rm_path"],
@@ -389,15 +397,17 @@ def run_training(
             print(f"GPU memory reserved: {torch.cuda.memory_reserved(device) / 1e9:.2f} GB")
 
     # ====== 加载两个奖励模型（双评判员）======
+    # Use a safe max_length for RM loading (they don't need the full sequence length)
+    safe_max_length = min(cfg.max_length, 1024)  # RMs typically don't need very long sequences
     helpful_rm_cfg = RewardModelConfig(
         base_model_path=cfg.helpful_rm_path,
         tokenizer_name=cfg.helpful_rm_path,
-        max_length=tokenizer.model_max_length,
+        max_length=safe_max_length,
     )
     harmless_rm_cfg = RewardModelConfig(
         base_model_path=cfg.harmless_rm_path,
         tokenizer_name=cfg.harmless_rm_path,
-        max_length=tokenizer.model_max_length,
+        max_length=safe_max_length,
     )
     helpful_rm, _ = load_reward_model(helpful_rm_cfg, torch_dtype=dtype, use_gradient_checkpointing=False)
     harmless_rm, _ = load_reward_model(harmless_rm_cfg, torch_dtype=dtype, use_gradient_checkpointing=False)
@@ -409,8 +419,9 @@ def run_training(
         p.requires_grad = False
 
     # ====== 构建数据集（helpful / harmless 共用同一结构）======
-    train_helpful = PreferenceDataset(cfg.train_helpful_path, tokenizer, tokenizer.model_max_length)
-    train_harmless = PreferenceDataset(cfg.train_harmless_path, tokenizer, tokenizer.model_max_length)
+    # Use configured max_length instead of tokenizer.model_max_length (which may be too large)
+    train_helpful = PreferenceDataset(cfg.train_helpful_path, tokenizer, cfg.max_length)
+    train_harmless = PreferenceDataset(cfg.train_harmless_path, tokenizer, cfg.max_length)
 
     # 合并两个维度的训练数据（简单拼接）
     train_records = train_helpful.records + train_harmless.records
@@ -421,7 +432,7 @@ def run_training(
             self.tokenizer = tokenizer
             self.max_length = max_length
 
-    train_ds = CombinedDataset(train_records, tokenizer, tokenizer.model_max_length)
+    train_ds = CombinedDataset(train_records, tokenizer, cfg.max_length)
 
     # Use DistributedSampler for multi-GPU training
     train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank) if is_ddp else None
