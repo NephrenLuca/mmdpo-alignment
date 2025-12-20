@@ -48,19 +48,25 @@ max_length: 512  # 从1024降到512
 
 ### Reward Model 训练（8×64GB GPU）
 
+**推荐配置（经过实际测试）**：
 ```yaml
-batch_size: 2
-max_length: 512
-gradient_accumulation_steps: 4
+batch_size: 1
+max_length: 384
+gradient_accumulation_steps: 8
 learning_rate: 2e-5  # 可根据有效batch_size调整
 ```
+
+**有效batch_size** = 1 × 8 × 8 = 64（保持不变）
 
 **预期显存占用**：
 - 模型参数（bf16）：~14GB
 - 优化器状态（fp32）：~28GB  
 - 梯度（bf16）：~14GB
-- 激活值（batch_size=2, max_length=512）：~5-8GB
-- **总计约 61-64GB** ✅
+- 激活值（batch_size=1, max_length=384）：~3-5GB
+- **总计约 59-61GB** ✅
+
+**如果仍OOM，可以进一步降低**：
+- `batch_size: 1` + `max_length: 256` + `gradient_accumulation_steps: 16`
 
 ### Safe-MM-DPO 训练（8×64GB GPU）
 

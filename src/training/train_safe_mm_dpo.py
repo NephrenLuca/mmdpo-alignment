@@ -302,11 +302,11 @@ def run_training(
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     policy_model = AutoModelForCausalLM.from_pretrained(
         cfg.policy_model_path,
-        torch_dtype=dtype,
+        dtype=dtype,  # Use dtype instead of deprecated torch_dtype
     )
     ref_model = AutoModelForCausalLM.from_pretrained(
         cfg.ref_model_path,
-        torch_dtype=dtype,
+        dtype=dtype,  # Use dtype instead of deprecated torch_dtype
     )
     ref_model.eval()
     for p in ref_model.parameters():

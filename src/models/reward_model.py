@@ -86,7 +86,7 @@ def load_reward_model(
         "pad_token_id": tokenizer.pad_token_id,
     }
     if torch_dtype is not None:
-        load_kwargs["torch_dtype"] = torch_dtype
+        load_kwargs["dtype"] = torch_dtype  # Use dtype instead of deprecated torch_dtype
 
     base_model = AutoModelForSequenceClassification.from_pretrained(
         cfg.base_model_path,

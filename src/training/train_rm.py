@@ -223,6 +223,9 @@ def train_one_epoch(
             if scheduler is not None:
                 scheduler.step()
             optimizer.zero_grad()
+            # Optionally clear cache periodically to reduce fragmentation
+            if step % (gradient_accumulation_steps * 10) == 0 and torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     # Average loss across all processes if using DDP
     if is_ddp:
@@ -352,7 +355,7 @@ def main() -> None:
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     model, tokenizer = load_reward_model(
         rm_cfg,
-        torch_dtype=dtype,
+        torch_dtype=dtype,  # load_reward_model accepts torch_dtype parameter name
         use_gradient_checkpointing=True,
     )
     # Move model to device - the base model inside already has the correct dtype
@@ -361,6 +364,13 @@ def main() -> None:
     # Wrap model with DDP if using distributed training
     if is_ddp:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+    
+    # Clear cache before training starts
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        if (not is_ddp) or rank == 0:
+            print(f"GPU memory allocated: {torch.cuda.memory_allocated(device) / 1e9:.2f} GB")
+            print(f"GPU memory reserved: {torch.cuda.memory_reserved(device) / 1e9:.2f} GB")
 
     train_ds = PreferenceDataset(train_cfg.train_path, tokenizer, train_cfg.max_length)
     val_ds = PreferenceDataset(train_cfg.val_path, tokenizer, train_cfg.max_length)
