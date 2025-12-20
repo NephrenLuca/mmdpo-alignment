@@ -463,7 +463,12 @@ def run_training(
     )
 
     # 拉格朗日乘子 λ（核心：动态平衡 helpful 与 harmless 损失）
+    # 使用log空间存储lambda，确保始终为正且更新稳定
+    lambda_log = torch.tensor(float(cfg.λ_init), device=device).log()
     lambda_param = torch.tensor(cfg.λ_init, device=device)
+    
+    # 用于平滑J_C估计的滑动平均
+    J_C_ema = None
 
     if (not is_ddp) or rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -536,17 +541,71 @@ def run_training(
                 optimizer.zero_grad()
 
                 # ====== 5. 更新拉格朗日乘子 λ（控制安全性约束强度）======
-                # 简单近似：将有害性成本 J_C 定义为 -E[δ_S]，δ_S 越大（越安全），成本越低。
+                # 根据 lambda_update_policy.md 中的理论，使用log空间更新机制
+                #
+                # 理论依据（来自 lambda_update_policy.md）：
+                # 1. 拉格朗日函数：L(θ, λ) = -J_R(θ) + λ · J_C(θ)
+                # 2. 对λ的梯度：∂L/∂λ = J_C(θ)
+                # 3. 在log空间更新：ln λ' = ln λ + α · λ · J_C
+                # 4. 指数变换：λ' = λ · exp(α · λ · J_C)
+                #
+                # 物理含义：
+                # - J_C > 0：策略有害，λ增大（加强安全性约束）
+                # - J_C < 0：策略安全，λ减小（减弱约束，专注有用性）
+                # - J_C = 0：刚好满足约束，λ不变
+                #
+                # 在DPO框架下，J_C的估计：
+                # J_C(θ) = E_{x,y~π_θ}[C(y,x)]，即策略生成的有害性成本期望
+                # 在DPO中，我们使用策略对chosen/rejected的相对偏好来近似：
+                # - delta_S = r_safe_w - r_safe_l：数据中的安全性差异（>0表示chosen更安全）
+                # - log_ratio = logp_w - logp_l：策略的偏好（>0表示策略偏好chosen）
+                # - 如果策略偏好与安全性方向一致，则策略安全，J_C < 0
+                # - 如果策略偏好与安全性方向不一致，则策略危险，J_C > 0
                 with torch.no_grad():
-                    J_C = -delta_S.mean()
-                    lambda_param = lambda_param + cfg.λ_lr * (J_C - 0.0)
-                    lambda_param = lambda_param.clamp(min=0.0)  # λ >= 0
+                    # 计算策略对chosen的相对偏好
+                    log_ratio = logp_w - logp_l
+                    
+                    # J_C的估计：策略偏好与安全性方向的对齐度
+                    # 当策略偏好与安全性方向一致时，J_C为负（策略安全）
+                    # 当策略偏好与安全性方向不一致时，J_C为正（策略危险）
+                    #
+                    # 策略偏好与安全性方向的对齐：
+                    # - 如果log_ratio > 0（偏好chosen）且delta_S > 0（chosen更安全）：对齐，J_C < 0
+                    # - 如果log_ratio < 0（偏好rejected）且delta_S < 0（rejected更安全）：对齐，J_C < 0
+                    # - 如果log_ratio > 0（偏好chosen）但delta_S < 0（chosen更危险）：不对齐，J_C > 0
+                    # - 如果log_ratio < 0（偏好rejected）但delta_S > 0（rejected更危险）：不对齐，J_C > 0
+                    #
+                    # 使用对齐度乘以安全性差异的绝对值作为J_C估计
+                    alignment = torch.sign(log_ratio) * torch.sign(delta_S)  # 对齐度：+1对齐，-1不对齐
+                    J_C_batch = (-alignment * torch.abs(delta_S)).mean()  # 对齐时J_C < 0，不对齐时J_C > 0
+                    
+                    # 使用指数移动平均平滑J_C，减少噪声波动
+                    nonlocal J_C_ema
+                    if J_C_ema is None:
+                        J_C_ema = J_C_batch.item()
+                    else:
+                        # 使用较大的平滑系数（0.95）确保稳定性
+                        J_C_ema = 0.95 * J_C_ema + 0.05 * J_C_batch.item()
+                    
+                    # 在log空间更新lambda（根据lambda_update_policy.md中的公式）
+                    # ln λ' = ln λ + α · λ · J_C
+                    alpha = cfg.λ_lr
+                    lambda_log = lambda_log + alpha * lambda_param * J_C_ema
+                    
+                    # 指数变换回原始空间：λ' = exp(ln λ')
+                    lambda_param_new = lambda_log.exp()
+                    
+                    # 可选：添加上下限以防止lambda过大或过小
+                    lambda_param = lambda_param_new.clamp(min=1e-6, max=10.0)
+                    # 同步更新log空间的值（考虑clamp的影响）
+                    lambda_log = lambda_param.log()
 
                 if (not is_ddp or rank == 0) and global_step % 10 == 0:
                     print(
                         f"Epoch {epoch} step {global_step} "
                         f"loss_H={loss_H.item():.4f} loss_S={loss_S.item():.4f} "
-                        f"KL={kl.item():.4f} lambda={lambda_param.item():.4f}"
+                        f"KL={kl.item():.4f} lambda={lambda_param.item():.4f} "
+                        f"J_C={J_C_ema:.4f} delta_S_mean={delta_S.mean().item():.4f}"
                     )
 
         # 一个 epoch 结束后保存 checkpoint (only on rank 0)
