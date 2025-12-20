@@ -132,6 +132,11 @@ class TrainConfig:
     weight_decay: float
     max_grad_norm: float
     gradient_accumulation_steps: int = 1
+    use_lora: bool = False
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.1
+    lora_target_modules: list[str] | None = None
 
 
 def load_train_config(config_path: Path, task: str) -> TrainConfig:
@@ -149,6 +154,10 @@ def load_train_config(config_path: Path, task: str) -> TrainConfig:
     except KeyError as e:
         raise KeyError(f"Missing {e} in rm_config.yaml for task '{task}'") from e
 
+    # Handle LoRA config
+    use_lora = cfg.get("use_lora", False)
+    lora_config = cfg.get("lora", {}) if use_lora else {}
+    
     return TrainConfig(
         base_model_path=cfg["base_model_path"],
         tokenizer_name=cfg.get("tokenizer_name"),
@@ -161,6 +170,11 @@ def load_train_config(config_path: Path, task: str) -> TrainConfig:
         weight_decay=float(cfg.get("weight_decay", 0.01)),
         max_grad_norm=float(cfg.get("max_grad_norm", 1.0)),
         gradient_accumulation_steps=int(cfg.get("gradient_accumulation_steps", 1)),
+        use_lora=use_lora,
+        lora_r=int(lora_config.get("r", 16)),
+        lora_alpha=int(lora_config.get("alpha", 32)),
+        lora_dropout=float(lora_config.get("dropout", 0.1)),
+        lora_target_modules=lora_config.get("target_modules"),
     )
 
 
@@ -349,6 +363,11 @@ def main() -> None:
         base_model_path=train_cfg.base_model_path,
         tokenizer_name=train_cfg.tokenizer_name,
         max_length=train_cfg.max_length,
+        use_lora=train_cfg.use_lora,
+        lora_r=train_cfg.lora_r,
+        lora_alpha=train_cfg.lora_alpha,
+        lora_dropout=train_cfg.lora_dropout,
+        lora_target_modules=train_cfg.lora_target_modules,
     )
     
     # Load model with memory optimizations
@@ -471,6 +490,7 @@ def main() -> None:
             print(f"Saving best model to {save_dir} (val_loss={best_val_loss:.4f})")
             # Unwrap DDP model for saving
             model_to_save = model.module if is_ddp else model
+            # save_pretrained handles both full models and LoRA adapters correctly
             model_to_save.model.save_pretrained(save_dir)
             tokenizer.save_pretrained(save_dir)
 

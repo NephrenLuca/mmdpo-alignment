@@ -23,12 +23,31 @@ val_harmless_path: data/val/harmless_pairs.jsonl
 # =========================
 # Training hyper-parameters
 # =========================
-learning_rate: 2e-5      # 建议在 1e-5 ~ 5e-5 之间
-batch_size: 1            # 每个GPU的batch size，进一步减小以降低显存占用（8x64GB GPU建议1）
-max_length: 384          # 序列长度，进一步减小以降低激活显存（8x64GB GPU建议384-512）
-gradient_accumulation_steps: 8  # 梯度累积步数，有效batch_size = batch_size * accumulation * num_gpus = 1 * 8 * 8 = 64
+learning_rate: 2e-5      # 建议在 1e-5 ~ 5e-5 之间（使用LoRA时可提高到1e-4）
+
+# 显存优化配置（二选一）：
+# 方案A: 全参数微调（需要更多显存）
+# batch_size: 1
+# max_length: 256
+# gradient_accumulation_steps: 16
+
+# 方案B: LoRA微调（推荐，显存占用大幅降低）
+batch_size: 4            # LoRA模式下可以使用更大的batch_size
+max_length: 512          # LoRA模式下可以使用更长的序列
+gradient_accumulation_steps: 2  # LoRA模式下需要较少的梯度累积
+
 num_epochs: 1            # 初次跑通建议 1 epoch
 weight_decay: 0.01
 max_grad_norm: 1.0
+
+# =========================
+# LoRA配置（参数高效微调）
+# =========================
+use_lora: true           # 启用LoRA以大幅降低显存占用（推荐）
+lora:
+  r: 16                  # LoRA rank，控制可训练参数数量（r越大参数越多，显存占用越高）
+  alpha: 32              # LoRA alpha，通常设为r的2倍
+  dropout: 0.1           # LoRA dropout
+  # target_modules: null  # 可选：指定要应用LoRA的模块，null时使用默认值（适用于Mistral）
 
 

@@ -48,25 +48,43 @@ max_length: 512  # 从1024降到512
 
 ### Reward Model 训练（8×64GB GPU）
 
-**推荐配置（经过实际测试）**：
+#### 方案A：全参数微调（不推荐，显存紧张）
+
 ```yaml
 batch_size: 1
-max_length: 384
-gradient_accumulation_steps: 8
-learning_rate: 2e-5  # 可根据有效batch_size调整
+max_length: 256
+gradient_accumulation_steps: 16
+use_lora: false
 ```
 
-**有效batch_size** = 1 × 8 × 8 = 64（保持不变）
+**预期显存占用**：~59-61GB（接近上限，容易OOM）
+
+#### 方案B：LoRA微调（⭐推荐）
+
+```yaml
+use_lora: true
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.1
+batch_size: 4
+max_length: 512
+gradient_accumulation_steps: 2
+learning_rate: 2e-5  # 或1e-4
+```
+
+**有效batch_size** = 4 × 2 × 8 = 64（保持不变）
 
 **预期显存占用**：
-- 模型参数（bf16）：~14GB
-- 优化器状态（fp32）：~28GB  
-- 梯度（bf16）：~14GB
-- 激活值（batch_size=1, max_length=384）：~3-5GB
-- **总计约 59-61GB** ✅
+- 模型参数（bf16）：~14GB（只加载，不训练）
+- 优化器状态（fp32）：~0.2GB（只训练LoRA参数） ✅
+- 梯度（bf16）：~0.2GB ✅
+- 激活值（batch_size=4, max_length=512）：~5-8GB
+- **总计约 19-23GB** ✅✅✅
 
-**如果仍OOM，可以进一步降低**：
-- `batch_size: 1` + `max_length: 256` + `gradient_accumulation_steps: 16`
+**LoRA可以节省约40GB显存！**
+
+详细说明请查看 [LORA_OPTIMIZATION.md](LORA_OPTIMIZATION.md)
 
 ### Safe-MM-DPO 训练（8×64GB GPU）
 
