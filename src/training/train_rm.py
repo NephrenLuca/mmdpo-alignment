@@ -131,6 +131,7 @@ class TrainConfig:
     num_epochs: int
     weight_decay: float
     max_grad_norm: float
+    gradient_accumulation_steps: int = 1
 
 
 def load_train_config(config_path: Path, task: str) -> TrainConfig:
@@ -159,6 +160,7 @@ def load_train_config(config_path: Path, task: str) -> TrainConfig:
         num_epochs=int(cfg.get("num_epochs", 1)),
         weight_decay=float(cfg.get("weight_decay", 0.01)),
         max_grad_norm=float(cfg.get("max_grad_norm", 1.0)),
+        gradient_accumulation_steps=int(cfg.get("gradient_accumulation_steps", 1)),
     )
 
 
@@ -181,6 +183,7 @@ def train_one_epoch(
     scheduler,
     device: torch.device,
     max_grad_norm: float,
+    gradient_accumulation_steps: int = 1,
     is_ddp: bool = False,
     local_rank: int = 0,
 ) -> float:
@@ -188,14 +191,16 @@ def train_one_epoch(
     total_loss = 0.0
     total_steps = 0
 
-    for batch in dataloader:
+    optimizer.zero_grad()
+    
+    for step, batch in enumerate(dataloader, start=1):
         chosen = batch["chosen"]
         rejected = batch["rejected"]
 
-        input_ids_c = chosen["input_ids"].to(device)
-        attn_mask_c = chosen["attention_mask"].to(device)
-        input_ids_r = rejected["input_ids"].to(device)
-        attn_mask_r = rejected["attention_mask"].to(device)
+        input_ids_c = chosen["input_ids"].to(device, non_blocking=True)
+        attn_mask_c = chosen["attention_mask"].to(device, non_blocking=True)
+        input_ids_r = rejected["input_ids"].to(device, non_blocking=True)
+        attn_mask_r = rejected["attention_mask"].to(device, non_blocking=True)
 
         # Get the actual model if wrapped in DDP
         model_for_forward = model.module if is_ddp else model
@@ -203,25 +208,30 @@ def train_one_epoch(
         scores_r = model_for_forward(input_ids=input_ids_r, attention_mask=attn_mask_r)
 
         loss = preference_loss(scores_c, scores_r)
-
-        optimizer.zero_grad()
+        loss = loss / gradient_accumulation_steps  # Scale loss for gradient accumulation
         loss.backward()
-        # For DDP, we can directly use model.parameters()
-        model_params = model.module.parameters() if is_ddp else model.parameters()
-        torch.nn.utils.clip_grad_norm_(model_params, max_grad_norm)
-        optimizer.step()
-        if scheduler is not None:
-            scheduler.step()
 
-        total_loss += loss.item()
+        total_loss += loss.item() * gradient_accumulation_steps  # Unscale for logging
         total_steps += 1
+
+        # Update weights every gradient_accumulation_steps
+        if step % gradient_accumulation_steps == 0:
+            # For DDP, we can directly use model.parameters()
+            model_params = model.module.parameters() if is_ddp else model.parameters()
+            torch.nn.utils.clip_grad_norm_(model_params, max_grad_norm)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+            optimizer.zero_grad()
 
     # Average loss across all processes if using DDP
     if is_ddp:
-        dist.all_reduce(torch.tensor(total_loss, device=device), op=dist.ReduceOp.SUM)
-        dist.all_reduce(torch.tensor(total_steps, device=device), op=dist.ReduceOp.SUM)
-        total_loss = total_loss / dist.get_world_size()
-        total_steps = total_steps / dist.get_world_size()
+        loss_tensor = torch.tensor(total_loss, device=device, dtype=torch.float32)
+        steps_tensor = torch.tensor(total_steps, device=device, dtype=torch.float32)
+        dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(steps_tensor, op=dist.ReduceOp.SUM)
+        total_loss = loss_tensor.item() / dist.get_world_size()
+        total_steps = steps_tensor.item() / dist.get_world_size()
 
     return total_loss / max(1, int(total_steps))
 
@@ -339,11 +349,13 @@ def main() -> None:
     )
     
     # Load model with memory optimizations
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     model, tokenizer = load_reward_model(
         rm_cfg,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+        torch_dtype=dtype,
         use_gradient_checkpointing=True,
     )
+    # Move model to device - the base model inside already has the correct dtype
     model.to(device)
 
     # Wrap model with DDP if using distributed training
@@ -396,9 +408,9 @@ def main() -> None:
     )
 
     # Adjust learning rate for distributed training (effective batch size increases)
-    effective_batch_size = train_cfg.batch_size * (world_size if is_ddp else 1)
-    if is_ddp and rank == 0:
-        print(f"Effective batch size: {effective_batch_size} (local batch_size={train_cfg.batch_size} x {world_size} GPUs)")
+    effective_batch_size = train_cfg.batch_size * train_cfg.gradient_accumulation_steps * (world_size if is_ddp else 1)
+    if (not is_ddp) or rank == 0:
+        print(f"Effective batch size: {effective_batch_size} (local batch_size={train_cfg.batch_size} x accumulation={train_cfg.gradient_accumulation_steps} x {world_size if is_ddp else 1} GPUs)")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -428,6 +440,7 @@ def main() -> None:
             scheduler,
             device,
             train_cfg.max_grad_norm,
+            gradient_accumulation_steps=train_cfg.gradient_accumulation_steps,
             is_ddp=is_ddp,
             local_rank=local_rank,
         )

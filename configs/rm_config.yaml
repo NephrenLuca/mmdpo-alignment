@@ -24,7 +24,9 @@ val_harmless_path: data/val/harmless_pairs.jsonl
 # Training hyper-parameters
 # =========================
 learning_rate: 2e-5      # 建议在 1e-5 ~ 5e-5 之间
-batch_size: 8            # 根据显存调整
+batch_size: 2            # 每个GPU的batch size，根据显存调整（8x64GB GPU建议2-4）
+max_length: 512          # 序列长度，根据显存调整（8x64GB GPU建议512-768）
+gradient_accumulation_steps: 4  # 梯度累积步数，有效batch_size = batch_size * accumulation * num_gpus
 num_epochs: 1            # 初次跑通建议 1 epoch
 weight_decay: 0.01
 max_grad_norm: 1.0
