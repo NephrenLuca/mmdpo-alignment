@@ -580,7 +580,7 @@ def run_training(
                     J_C_batch = (-alignment * torch.abs(delta_S)).mean()  # 对齐时J_C < 0，不对齐时J_C > 0
                     
                     # 使用指数移动平均平滑J_C，减少噪声波动
-                    nonlocal J_C_ema
+                    # J_C_ema 是在函数作用域内定义的，不需要 nonlocal
                     if J_C_ema is None:
                         J_C_ema = J_C_batch.item()
                     else:
