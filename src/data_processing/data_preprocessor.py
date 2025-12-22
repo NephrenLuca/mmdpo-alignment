@@ -111,18 +111,39 @@ def build_preference_pairs(
             if chosen is None or rejected is None:
                 continue
 
+            # 对于harmless维度，提取safety labels（用于Cost Model的classification loss）
+            # 根据论文，s(y) = +1 表示有害，s(y) = -1 表示无害
+            # PKU-SafeRLHF中：is_response_X_safe = True 表示无害，False 表示有害
+            # 因此：s(y) = -1 if is_safe else +1
+            safety_labels = None
+            if dimension == "harmless":
+                is_safe_chosen = rec.get(f"is_response_{idx}_safe")
+                is_safe_rejected = rec.get(f"is_response_{1 - idx}_safe")
+                
+                # 如果存在safety labels，转换为论文格式：+1表示有害，-1表示无害
+                if is_safe_chosen is not None and is_safe_rejected is not None:
+                    # is_safe=True -> s=-1 (无害), is_safe=False -> s=+1 (有害)
+                    safety_labels = {
+                        "chosen": -1 if is_safe_chosen else +1,
+                        "rejected": -1 if is_safe_rejected else +1,
+                    }
+
         # 其它未知格式：暂时跳过
         else:
             continue
 
-        out.append(
-            {
-                "prompt": prompt,
-                "chosen_response": chosen,
-                "rejected_response": rejected,
-                "dimension": dimension,
-            }
-        )
+        pair_record = {
+            "prompt": prompt,
+            "chosen_response": chosen,
+            "rejected_response": rejected,
+            "dimension": dimension,
+        }
+        
+        # 如果是harmless维度且存在safety labels，添加到记录中
+        if dimension == "harmless" and safety_labels is not None:
+            pair_record["safety_labels"] = safety_labels
+
+        out.append(pair_record)
     return out
 
 

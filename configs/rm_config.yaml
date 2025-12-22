@@ -50,4 +50,13 @@ lora:
   dropout: 0.1           # LoRA dropout
   # target_modules: null  # 可选：指定要应用LoRA的模块，null时使用默认值（适用于Mistral）
 
+# =========================
+# Cost Model配置（仅用于harmless任务）
+# =========================
+# 根据论文2310.12773v1，Cost Model需要同时训练pairwise comparison loss和classification loss
+# classification_loss_weight: 控制classification loss的权重（论文公式6的第二项）
+# 对于helpful任务，此参数会被忽略（因为helpful数据没有safety labels）
+# 对于harmless任务，建议设置为1.0（与pairwise loss同等权重）
+classification_loss_weight: 1.0  # 仅用于harmless RM（Cost Model）
+
 

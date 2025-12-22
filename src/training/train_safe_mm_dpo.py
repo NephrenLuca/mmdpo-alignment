@@ -138,6 +138,7 @@ class DPOConfig:
     max_grad_norm: float
     warmup_steps: int
     max_length: int  # Maximum sequence length for tokenization
+    cost_threshold: float = 0.0  # Threshold d in J_C = E[C(y,x)] + d (论文中的threshold (-d))
 
     policy_model_path: str
     ref_model_path: str
@@ -185,6 +186,7 @@ def load_dpo_config(path: Path) -> DPOConfig:
         max_grad_norm=float(cfg.get("max_grad_norm", 1.0)),
         warmup_steps=int(cfg.get("warmup_steps", 0)),
         max_length=int(max_length),
+        cost_threshold=float(cfg.get("cost_threshold", 0.0)),  # threshold d in J_C = E[C] + d
         policy_model_path=cfg["policy_model_path"],
         ref_model_path=cfg["ref_model_path"],
         helpful_rm_path=cfg["helpful_rm_path"],
@@ -279,11 +281,30 @@ def kl_divergence(
 
 def dynamic_beta(β_ori: float, w: float, k: float, delta: torch.Tensor) -> torch.Tensor:
     """
-    MM-DPO 动态缩放因子：
+    MM-DPO 动态缩放因子（论文 2502.10391v1 公式 188）：
         β(δ) = β_ori * (1 + w * (1 - exp(-k * δ)))
+    
     高置信度（|δ| 大）的样本拥有更大的 β，从而在训练中权重更高。
+    
+    约束（论文第 189 行）：β(δ) ∈ [β_ori, (1+w)β_ori]
+    这确保训练稳定性，避免过于激进的更新。
+    
+    注意：如果 delta < 0（数据噪声导致 chosen 比 rejected 更差），
+    使用绝对值确保 beta 随 |delta| 增大而增大。
     """
-    return β_ori * (1.0 + w * (1.0 - torch.exp(-k * delta)))
+    # 使用 delta 的绝对值，确保 beta 随 |delta| 增大而增大
+    # 这处理了数据噪声导致 delta < 0 的情况
+    delta_abs = torch.abs(delta)
+    
+    # 计算动态 beta（论文公式 188）
+    beta = β_ori * (1.0 + w * (1.0 - torch.exp(-k * delta_abs)))
+    
+    # 应用论文约束：β(d) ∈ [β_ori, (1+w)β_ori]（论文第 189 行）
+    beta_min = β_ori
+    beta_max = β_ori * (1.0 + w)
+    beta = beta.clamp(min=beta_min, max=beta_max)
+    
+    return beta
 
 
 def setup_distributed():
@@ -323,7 +344,7 @@ def run_training(
         if rank == 0:
             print(f"Distributed training initialized: world_size={world_size}")
     else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Single GPU training on device: {device}")
 
     # ====== 加载策略模型与参考模型 ======
@@ -466,13 +487,13 @@ def run_training(
     # 使用log空间存储lambda，确保始终为正且更新稳定
     lambda_log = torch.tensor(float(cfg.λ_init), device=device).log()
     lambda_param = torch.tensor(cfg.λ_init, device=device)
-    
+
     # 用于平滑J_C估计的滑动平均
     J_C_ema = None
 
     if (not is_ddp) or rank == 0:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        logging_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logging_dir.mkdir(parents=True, exist_ok=True)
 
     global_step = 0
 
@@ -503,10 +524,15 @@ def run_training(
                 r_helpful_l = helpful_rm(rejected_ids, rejected_mask)
                 delta_H = r_helpful_w - r_helpful_l
 
-                # Harmless-RM
-                r_safe_w = harmless_rm(chosen_ids, chosen_mask)
-                r_safe_l = harmless_rm(rejected_ids, rejected_mask)
-                delta_S = r_safe_w - r_safe_l
+                # Harmless-RM (Cost Model in Safe RLHF terminology)
+                # 注意：harmless_rm输出的是safety score（越高越安全）
+                # 在Safe RLHF中，Cost Model输出C(y,x)，值越高表示越有害
+                # 因此需要转换：cost = -safety_score
+                safety_score_w = harmless_rm(chosen_ids, chosen_mask)  # 安全性分数（越高越安全）
+                safety_score_l = harmless_rm(rejected_ids, rejected_mask)
+                cost_w = -safety_score_w  # 转换为cost（越高越有害）
+                cost_l = -safety_score_l
+                delta_S = safety_score_w - safety_score_l  # 仍用于MM-DPO的beta计算（safety score差异）
 
             # ====== 3. 动态缩放因子 β_H, β_S（MM-DPO 核心）======
             beta_H = dynamic_beta(cfg.β_ori, cfg.w, cfg.k, delta_H)
@@ -541,53 +567,56 @@ def run_training(
                 optimizer.zero_grad()
 
                 # ====== 5. 更新拉格朗日乘子 λ（控制安全性约束强度）======
-                # 根据 lambda_update_policy.md 中的理论，使用log空间更新机制
+                # 根据论文 2310.12773v1 (Safe RLHF) 的实现
                 #
-                # 理论依据（来自 lambda_update_policy.md）：
-                # 1. 拉格朗日函数：L(θ, λ) = -J_R(θ) + λ · J_C(θ)
-                # 2. 对λ的梯度：∂L/∂λ = J_C(θ)
-                # 3. 在log空间更新：ln λ' = ln λ + α · λ · J_C
-                # 4. 指数变换：λ' = λ · exp(α · λ · J_C)
+                # 理论依据（论文公式 232, 787）：
+                # 1. J_C(θ) = E_{x~D, y~π_θ}[C_ψ(y, x)] + d
+                #    其中 C_ψ 是 Cost Model（harmless_rm）的输出，d 是 threshold
+                # 2. Lambda更新（公式 31）：ln λ_{k+1} = ln λ_k + α · λ_k · J_C(θ_k)
+                # 3. 使用 moving average 来估计 J_C（论文 Appendix B.3）
                 #
                 # 物理含义：
-                # - J_C > 0：策略有害，λ增大（加强安全性约束）
-                # - J_C < 0：策略安全，λ减小（减弱约束，专注有用性）
-                # - J_C = 0：刚好满足约束，λ不变
+                # - J_C > 0：策略有害（期望cost > -d），λ增大（加强安全性约束）
+                # - J_C < 0：策略安全（期望cost < -d），λ减小（减弱约束，专注有用性）
+                # - J_C = 0：刚好满足约束（期望cost = -d），λ不变
                 #
                 # 在DPO框架下，J_C的估计：
-                # J_C(θ) = E_{x,y~π_θ}[C(y,x)]，即策略生成的有害性成本期望
-                # 在DPO中，我们使用策略对chosen/rejected的相对偏好来近似：
-                # - delta_S = r_safe_w - r_safe_l：数据中的安全性差异（>0表示chosen更安全）
-                # - log_ratio = logp_w - logp_l：策略的偏好（>0表示策略偏好chosen）
-                # - 如果策略偏好与安全性方向一致，则策略安全，J_C < 0
-                # - 如果策略偏好与安全性方向不一致，则策略危险，J_C > 0
+                # 使用策略对chosen/rejected的相对偏好来估计当前策略的期望cost
+                # - 策略更偏好chosen时，使用chosen的cost作为权重
+                # - 策略更偏好rejected时，使用rejected的cost作为权重
                 with torch.no_grad():
-                    # 计算策略对chosen的相对偏好
-                    log_ratio = logp_w - logp_l
-                    
-                    # J_C的估计：策略偏好与安全性方向的对齐度
-                    # 当策略偏好与安全性方向一致时，J_C为负（策略安全）
-                    # 当策略偏好与安全性方向不一致时，J_C为正（策略危险）
+                    # 根据论文2310.12773v1，J_C(θ) = E_{x~D, y~π_θ}[C_ψ(y, x)] + d
+                    # 其中C_ψ是Cost Model的输出，d是threshold
                     #
-                    # 策略偏好与安全性方向的对齐：
-                    # - 如果log_ratio > 0（偏好chosen）且delta_S > 0（chosen更安全）：对齐，J_C < 0
-                    # - 如果log_ratio < 0（偏好rejected）且delta_S < 0（rejected更安全）：对齐，J_C < 0
-                    # - 如果log_ratio > 0（偏好chosen）但delta_S < 0（chosen更危险）：不对齐，J_C > 0
-                    # - 如果log_ratio < 0（偏好rejected）但delta_S > 0（rejected更危险）：不对齐，J_C > 0
-                    #
-                    # 使用对齐度乘以安全性差异的绝对值作为J_C估计
-                    alignment = torch.sign(log_ratio) * torch.sign(delta_S)  # 对齐度：+1对齐，-1不对齐
-                    J_C_batch = (-alignment * torch.abs(delta_S)).mean()  # 对齐时J_C < 0，不对齐时J_C > 0
+                    # 在DPO框架下，我们需要估计当前策略的期望cost
+                    # 使用策略对chosen/rejected的相对偏好来估计策略会选择哪个回答
                     
-                    # 使用指数移动平均平滑J_C，减少噪声波动
-                    # J_C_ema 是在函数作用域内定义的，不需要 nonlocal
+                    # 计算策略对chosen和rejected的相对偏好概率
+                    # 使用softmax归一化，得到策略选择chosen和rejected的概率
+                    log_probs = torch.stack([logp_w, logp_l], dim=-1)  # (batch, 2)
+                    probs = torch.softmax(log_probs, dim=-1)  # (batch, 2)
+                    prob_chosen = probs[:, 0]  # 策略选择chosen的概率
+                    prob_rejected = probs[:, 1]  # 策略选择rejected的概率
+                    
+                    # Cost Model的输出（论文中的C_ψ(y, x)）
+                    # harmless_rm输出的是safety score（越高越安全），需要转换为cost（越高越有害）
+                    # cost = -safety_score
+                    # 注意：cost_w和cost_l在上面已经计算（在计算delta_S之前）
+                    
+                    # 估计当前策略的期望cost：J_C(θ) = E_{y~π_θ}[C(y,x)] + d
+                    # 使用策略偏好作为权重，估计策略会选择哪个回答及其对应的cost
+                    expected_cost = (prob_chosen * cost_w + prob_rejected * cost_l).mean()
+                    J_C_batch = expected_cost + cfg.cost_threshold  # J_C = E[C] + d
+                    
+                    # 使用指数移动平均平滑J_C，减少噪声波动（论文Appendix B.3）
                     if J_C_ema is None:
                         J_C_ema = J_C_batch.item()
                     else:
                         # 使用较大的平滑系数（0.95）确保稳定性
+                        # 论文中提到使用moving average，但没有明确给出系数，这里使用0.95
                         J_C_ema = 0.95 * J_C_ema + 0.05 * J_C_batch.item()
                     
-                    # 在log空间更新lambda（根据lambda_update_policy.md中的公式）
+                    # 在log空间更新lambda（论文公式 31）
                     # ln λ' = ln λ + α · λ · J_C
                     alpha = cfg.λ_lr
                     lambda_log = lambda_log + alpha * lambda_param * J_C_ema
@@ -610,13 +639,13 @@ def run_training(
 
         # 一个 epoch 结束后保存 checkpoint (only on rank 0)
         if (not is_ddp) or rank == 0:
-            save_dir = output_dir / f"epoch_{epoch}"
-            save_dir.mkdir(parents=True, exist_ok=True)
+        save_dir = output_dir / f"epoch_{epoch}"
+        save_dir.mkdir(parents=True, exist_ok=True)
             # Unwrap DDP model for saving
             model_to_save = policy_model.module if is_ddp else policy_model
             model_to_save.save_pretrained(save_dir)
-            tokenizer.save_pretrained(save_dir)
-            print(f"Saved epoch {epoch} checkpoint to {save_dir}")
+        tokenizer.save_pretrained(save_dir)
+        print(f"Saved epoch {epoch} checkpoint to {save_dir}")
 
     cleanup_distributed()
 

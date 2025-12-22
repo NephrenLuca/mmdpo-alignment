@@ -14,7 +14,8 @@ learning_rate: 5e-7      # 使用LoRA时可提高到1e-6或2e-6
 batch_size: 4            # LoRA模式下可以使用较小的batch_size（8x64GB GPU建议2-4）
 max_length: 512          # 序列最大长度，根据显存调整（8x64GB GPU建议384-512）
 kl_coeff: 0.1
-λ_lr: 0.01
+λ_lr: 0.01        # Lambda更新学习率（论文中Beaver-v1使用0.01，v2/v3使用0.04）
+cost_threshold: 0.0  # Threshold d in J_C = E[C(y,x)] + d（论文中Beaver-v1使用0，v2/v3使用3）
 epochs: 2
 gradient_accumulation_steps: 4   # 有效 batch size = batch_size * grad_acc * num_gpus
 max_grad_norm: 1.0

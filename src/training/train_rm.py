@@ -61,6 +61,8 @@ class PreferenceDataset(Dataset):
         - prompt
         - chosen_response
         - rejected_response
+        - safety_labels (optional, for harmless dimension): {"chosen": ±1, "rejected": ±1}
+          where +1 means harmful, -1 means harmless
     """
 
     def __init__(
@@ -116,6 +118,15 @@ class PreferenceDataset(Dataset):
                 "attention_mask": tok_rejected["attention_mask"].squeeze(0),
             },
         }
+        
+        # 如果存在safety labels，添加到sample中（用于Cost Model的classification loss）
+        if "safety_labels" in rec:
+            safety_labels = rec["safety_labels"]
+            sample["safety_labels"] = {
+                "chosen": torch.tensor(safety_labels["chosen"], dtype=torch.float32),
+                "rejected": torch.tensor(safety_labels["rejected"], dtype=torch.float32),
+            }
+        
         return sample
 
 
@@ -157,7 +168,7 @@ def load_train_config(config_path: Path, task: str) -> TrainConfig:
     # Handle LoRA config
     use_lora = cfg.get("use_lora", False)
     lora_config = cfg.get("lora", {}) if use_lora else {}
-    
+
     return TrainConfig(
         base_model_path=cfg["base_model_path"],
         tokenizer_name=cfg.get("tokenizer_name"),
@@ -175,6 +186,7 @@ def load_train_config(config_path: Path, task: str) -> TrainConfig:
         lora_alpha=int(lora_config.get("alpha", 32)),
         lora_dropout=float(lora_config.get("dropout", 0.1)),
         lora_target_modules=lora_config.get("target_modules"),
+        classification_loss_weight=float(cfg.get("classification_loss_weight", 0.0)),
     )
 
 
@@ -190,6 +202,34 @@ def preference_loss(
     return -torch.nn.functional.logsigmoid(diff).mean()
 
 
+def classification_loss(
+    scores: torch.Tensor,
+    safety_labels: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Classification loss for Cost Model (论文公式 6 的第二项).
+    
+    根据论文，如果 y 是有害的 (s(y) = +1)，则 Cost Model 应该输出正数（高cost）
+    如果 y 是无害的 (s(y) = -1)，则 Cost Model 应该输出负数（低cost）
+    
+    损失函数：-log(sigmoid(s(y) * C(y, x)))
+    这等价于最大化 P(y > y0|x) 或 P(y0 > y|x)，其中 y0 是虚拟边界响应（C(y0, x) = 0）
+    
+    Args:
+        scores: Cost Model 的输出 (batch,)
+        safety_labels: Safety labels, +1 表示有害，-1 表示无害 (batch,)
+    
+    Returns:
+        Classification loss (scalar)
+    """
+    # 计算 s(y) * C(y, x)
+    signed_scores = safety_labels * scores
+    # 损失：-log(sigmoid(s(y) * C(y, x)))
+    # 当 s(y) = +1 且 C > 0 时，损失小（正确预测有害）
+    # 当 s(y) = -1 且 C < 0 时，损失小（正确预测无害）
+    return -torch.nn.functional.logsigmoid(signed_scores).mean()
+
+
 def train_one_epoch(
     model: nn.Module,
     dataloader: DataLoader,
@@ -200,6 +240,7 @@ def train_one_epoch(
     gradient_accumulation_steps: int = 1,
     is_ddp: bool = False,
     local_rank: int = 0,
+    classification_loss_weight: float = 0.0,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -221,7 +262,22 @@ def train_one_epoch(
         scores_c = model_for_forward(input_ids=input_ids_c, attention_mask=attn_mask_c)
         scores_r = model_for_forward(input_ids=input_ids_r, attention_mask=attn_mask_r)
 
+        # Pairwise ranking loss (论文公式 5 或 6 的第一项)
         loss = preference_loss(scores_c, scores_r)
+        
+        # Classification loss (论文公式 6 的第二项，仅用于Cost Model)
+        if classification_loss_weight > 0.0 and "safety_labels" in batch:
+            safety_labels_chosen = batch["safety_labels"]["chosen"].to(device, non_blocking=True)
+            safety_labels_rejected = batch["safety_labels"]["rejected"].to(device, non_blocking=True)
+            
+            # 对chosen和rejected分别计算classification loss
+            cls_loss_chosen = classification_loss(scores_c, safety_labels_chosen)
+            cls_loss_rejected = classification_loss(scores_r, safety_labels_rejected)
+            cls_loss = (cls_loss_chosen + cls_loss_rejected) / 2.0
+            
+            # 总损失 = ranking loss + classification loss
+            loss = loss + classification_loss_weight * cls_loss
+        
         loss = loss / gradient_accumulation_steps  # Scale loss for gradient accumulation
         loss.backward()
 
@@ -233,9 +289,9 @@ def train_one_epoch(
             # For DDP, we can directly use model.parameters()
             model_params = model.module.parameters() if is_ddp else model.parameters()
             torch.nn.utils.clip_grad_norm_(model_params, max_grad_norm)
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
+        optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
             optimizer.zero_grad()
             # Optionally clear cache periodically to reduce fragmentation
             if step % (gradient_accumulation_steps * 10) == 0 and torch.cuda.is_available():
@@ -456,7 +512,7 @@ def main() -> None:
 
     best_val_loss = float("inf")
     if (not is_ddp) or rank == 0:
-        args.output_dir.mkdir(parents=True, exist_ok=True)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, train_cfg.num_epochs + 1):
         if is_ddp:
@@ -472,16 +528,17 @@ def main() -> None:
             gradient_accumulation_steps=train_cfg.gradient_accumulation_steps,
             is_ddp=is_ddp,
             local_rank=local_rank,
+            classification_loss_weight=train_cfg.classification_loss_weight,
         )
         metrics = evaluate(model, val_loader, device, is_ddp=is_ddp)
 
         if (not is_ddp) or rank == 0:
-            print(
-                f"[{args.task}] Epoch {epoch}/{train_cfg.num_epochs} "
-                f"train_loss={train_loss:.4f} "
-                f"val_loss={metrics['val_loss']:.4f} "
-                f"val_acc={metrics['val_accuracy']:.4f}"
-            )
+        print(
+            f"[{args.task}] Epoch {epoch}/{train_cfg.num_epochs} "
+            f"train_loss={train_loss:.4f} "
+            f"val_loss={metrics['val_loss']:.4f} "
+            f"val_acc={metrics['val_accuracy']:.4f}"
+        )
 
         # Save best checkpoint (only on rank 0)
         if ((not is_ddp) or rank == 0) and metrics["val_loss"] < best_val_loss:
