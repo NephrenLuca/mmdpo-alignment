@@ -23,7 +23,7 @@ val_harmless_path: data/val/harmless_pairs.jsonl
 # =========================
 # Training hyper-parameters
 # =========================
-learning_rate: 1e-5      # 建议在 1e-5 ~ 5e-5 之间（使用LoRA时可提高到1e-4）
+learning_rate: 1.5e-5      # 建议在 1e-5 ~ 5e-5 之间（使用LoRA时可提高到1e-4）
 
 # 显存优化配置（二选一）：
 # 方案A: 全参数微调（需要更多显存）
@@ -36,7 +36,7 @@ batch_size: 4            # LoRA模式下可以使用更大的batch_size
 max_length: 512          # LoRA模式下可以使用更长的序列
 gradient_accumulation_steps: 2  # LoRA模式下需要较少的梯度累积
 
-num_epochs: 2            # 初次跑通建议 1 epoch
+num_epochs: 3            # 初次跑通建议 1 epoch
 weight_decay: 0.01
 max_grad_norm: 1.0
 
