@@ -466,10 +466,21 @@ def main() -> None:
                 ),
             }
 
-        return {
+        result = {
             "chosen": stack_side("chosen"),
             "rejected": stack_side("rejected"),
         }
+        
+        # Collate safety labels if present (for Cost Model classification loss)
+        if "safety_labels" in batch[0]:
+            safety_labels_chosen = [b["safety_labels"]["chosen"] for b in batch]
+            safety_labels_rejected = [b["safety_labels"]["rejected"] for b in batch]
+            result["safety_labels"] = {
+                "chosen": torch.stack(safety_labels_chosen),
+                "rejected": torch.stack(safety_labels_rejected),
+            }
+        
+        return result
 
     # Use DistributedSampler for multi-GPU training
     train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank) if is_ddp else None
@@ -512,7 +523,7 @@ def main() -> None:
 
     best_val_loss = float("inf")
     if (not is_ddp) or rank == 0:
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+        args.output_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, train_cfg.num_epochs + 1):
         if is_ddp:
@@ -533,12 +544,12 @@ def main() -> None:
         metrics = evaluate(model, val_loader, device, is_ddp=is_ddp)
 
         if (not is_ddp) or rank == 0:
-        print(
-            f"[{args.task}] Epoch {epoch}/{train_cfg.num_epochs} "
-            f"train_loss={train_loss:.4f} "
-            f"val_loss={metrics['val_loss']:.4f} "
-            f"val_acc={metrics['val_accuracy']:.4f}"
-        )
+            print(
+                f"[{args.task}] Epoch {epoch}/{train_cfg.num_epochs} "
+                f"train_loss={train_loss:.4f} "
+                f"val_loss={metrics['val_loss']:.4f} "
+                f"val_acc={metrics['val_accuracy']:.4f}"
+            )
 
         # Save best checkpoint (only on rank 0)
         if ((not is_ddp) or rank == 0) and metrics["val_loss"] < best_val_loss:
