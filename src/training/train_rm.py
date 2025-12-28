@@ -148,6 +148,7 @@ class TrainConfig:
     lora_alpha: int = 32
     lora_dropout: float = 0.1
     lora_target_modules: list[str] | None = None
+    classification_loss_weight: float = 0.0  # Weight for classification loss (for Cost Model)
 
 
 def load_train_config(config_path: Path, task: str) -> TrainConfig:
