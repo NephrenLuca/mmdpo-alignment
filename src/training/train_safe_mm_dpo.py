@@ -344,7 +344,7 @@ def run_training(
         if rank == 0:
             print(f"Distributed training initialized: world_size={world_size}")
     else:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Single GPU training on device: {device}")
 
     # ====== 加载策略模型与参考模型 ======
