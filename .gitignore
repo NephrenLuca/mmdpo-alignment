@@ -2,3 +2,4 @@ models/
 data/
 data.tar.gz
 papers/
+safe_rlhf/
