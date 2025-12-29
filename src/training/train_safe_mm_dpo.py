@@ -492,8 +492,8 @@ def run_training(
     J_C_ema = None
 
     if (not is_ddp) or rank == 0:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    logging_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logging_dir.mkdir(parents=True, exist_ok=True)
 
     global_step = 0
 
