@@ -639,13 +639,13 @@ def run_training(
 
         # 一个 epoch 结束后保存 checkpoint (only on rank 0)
         if (not is_ddp) or rank == 0:
-        save_dir = output_dir / f"epoch_{epoch}"
-        save_dir.mkdir(parents=True, exist_ok=True)
+            save_dir = output_dir / f"epoch_{epoch}"
+            save_dir.mkdir(parents=True, exist_ok=True)
             # Unwrap DDP model for saving
             model_to_save = policy_model.module if is_ddp else policy_model
             model_to_save.save_pretrained(save_dir)
-        tokenizer.save_pretrained(save_dir)
-        print(f"Saved epoch {epoch} checkpoint to {save_dir}")
+            tokenizer.save_pretrained(save_dir)
+            print(f"Saved epoch {epoch} checkpoint to {save_dir}")
 
     cleanup_distributed()
 

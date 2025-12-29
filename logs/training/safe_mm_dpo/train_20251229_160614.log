@@ -1,0 +1,1 @@
+scripts/train_dpo_distributed.sh: line 38: torchrun: command not found
