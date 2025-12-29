@@ -125,6 +125,7 @@ def collate_fn(tokenizer):
 
 @dataclass
 class DPOConfig:
+    # Required fields (no default values)
     λ_init: float
     w: float
     k: float
@@ -138,18 +139,17 @@ class DPOConfig:
     max_grad_norm: float
     warmup_steps: int
     max_length: int  # Maximum sequence length for tokenization
-    cost_threshold: float = 0.0  # Threshold d in J_C = E[C(y,x)] + d (论文中的threshold (-d))
-
     policy_model_path: str
     ref_model_path: str
     helpful_rm_path: str
     harmless_rm_path: str
-
     train_helpful_path: Path
     train_harmless_path: Path
     val_helpful_path: Path
     val_harmless_path: Path
 
+    # Optional fields (with default values)
+    cost_threshold: float = 0.0  # Threshold d in J_C = E[C(y,x)] + d (论文中的threshold (-d))
     # LoRA configuration
     use_lora: bool = False
     lora_r: int = 16
