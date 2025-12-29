@@ -608,33 +608,67 @@ def run_training(
                     expected_cost = (prob_chosen * cost_w + prob_rejected * cost_l).mean()
                     J_C_batch = expected_cost + cfg.cost_threshold  # J_C = E[C] + d
                     
-                    # 使用指数移动平均平滑J_C，减少噪声波动（论文Appendix B.3）
+                    # Lambda和J_C更新策略（参考PKU-Alignment的PPO-Lag实现）
+                    # PKU的实现：
+                    #   1. 使用滑动窗口（deque）存储最近的episode costs
+                    #   2. episode_cost = mean(episode_costs)  # 期望cost E[C]
+                    #   3. lambda_loss = -(episode_cost - threshold) * lambda
+                    #   4. 使用SGD优化器更新log_lambda
+                    #   5. 等价于：ln λ_{k+1} = ln λ_k + lambda_lr * (E[C] - d) * λ_k
+                    #
+                    # 注意：PKU使用 (E[C] - d) 而不是论文公式31中的 J_C = E[C] + d
+                    # 这是因为PKU的lambda_loss中已经包含了threshold的减法
+                    #
+                    # 我们使用EMA平滑expected_cost（等价于PKU的滑动窗口平均）
                     if J_C_ema is None:
-                        J_C_ema = J_C_batch.item()
+                        J_C_ema = expected_cost.item()  # E[C]，不含threshold
                     else:
-                        # 使用较大的平滑系数（0.95）确保稳定性
-                        # 论文中提到使用moving average，但没有明确给出系数，这里使用0.95
-                        J_C_ema = 0.95 * J_C_ema + 0.05 * J_C_batch.item()
+                        # 使用EMA平滑，系数0.95（与PKU的滑动窗口类似）
+                        J_C_ema = 0.95 * J_C_ema + 0.05 * expected_cost.item()
                     
-                    # 在log空间更新lambda（论文公式 31）
-                    # ln λ' = ln λ + α · λ · J_C
+                    # Lambda更新：ln λ_{k+1} = ln λ_k + lambda_lr * (E[C] - d) * λ_k
+                    # 其中 E[C] = J_C_ema（期望cost），d = cost_threshold
                     alpha = cfg.λ_lr
-                    lambda_log = lambda_log + alpha * lambda_param * J_C_ema
+                    lambda_log = lambda_log + alpha * lambda_param * (J_C_ema - cfg.cost_threshold)
                     
                     # 指数变换回原始空间：λ' = exp(ln λ')
                     lambda_param_new = lambda_log.exp()
                     
-                    # 可选：添加上下限以防止lambda过大或过小
-                    lambda_param = lambda_param_new.clamp(min=1e-6, max=10.0)
-                    # 同步更新log空间的值（考虑clamp的影响）
-                    lambda_log = lambda_param.log()
+                    # 添加上下限以防止lambda过大或过小（参考PKU实现）
+                    lambda_max = 10.0  # 可以配置
+                    lambda_param_old = lambda_param.clone()
+                    lambda_param = lambda_param_new.clamp(min=1e-6, max=lambda_max)
+                    
+                    # 同步更新log空间的值（参考PKU的clamp处理）
+                    # 关键改进：如果被clamp到上限，但J_C_ema - cost_threshold仍然为正，
+                    # 保持lambda_log为更新后的值（不重置），这样如果约束改善，lambda可以快速响应
+                    # 但如果J_C_ema - cost_threshold变为负值，lambda可以立即下降
+                    if lambda_param.item() != lambda_param_new.item():
+                        # 被clamp了
+                        if lambda_param.item() >= lambda_max and (J_C_ema - cfg.cost_threshold) > 0:
+                            # 达到上限且约束仍然违反，保持lambda_log为更新后的值
+                            # 这样如果约束改善（J_C_ema - cost_threshold变为负值），lambda可以立即下降
+                            # 但为了避免数值溢出，限制lambda_log的范围
+                            lambda_log_max = torch.tensor(lambda_max * 2.0, device=device).log()  # 允许lambda_log稍微超过上限
+                            if lambda_log > lambda_log_max:
+                                lambda_log = lambda_log_max
+                        elif lambda_param.item() <= 1e-6 and (J_C_ema - cfg.cost_threshold) < 0:
+                            # 达到下限且约束满足，保持lambda_log为更新后的值
+                            lambda_log_min = torch.tensor(1e-8, device=device).log()
+                            if lambda_log < lambda_log_min:
+                                lambda_log = lambda_log_min
+                        else:
+                            # 其他情况（例如被clamp但约束方向已改变），将lambda_log设置为clamp后的值
+                            lambda_log = lambda_param.log()
 
                 if (not is_ddp or rank == 0) and global_step % 10 == 0:
+                    # J_C_ema是E[C]（期望cost），J_C = E[C] + d用于显示
+                    J_C_display = J_C_ema + cfg.cost_threshold
                     print(
                         f"Epoch {epoch} step {global_step} "
                         f"loss_H={loss_H.item():.4f} loss_S={loss_S.item():.4f} "
                         f"KL={kl.item():.4f} lambda={lambda_param.item():.4f} "
-                        f"J_C={J_C_ema:.4f} delta_S_mean={delta_S.mean().item():.4f}"
+                        f"J_C={J_C_display:.4f} (E[C]={J_C_ema:.4f}) delta_S_mean={delta_S.mean().item():.4f}"
                     )
 
         # 一个 epoch 结束后保存 checkpoint (only on rank 0)
