@@ -431,7 +431,7 @@ def main() -> None:
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     model, tokenizer = load_reward_model(
         rm_cfg,
-        torch_dtype=dtype,  # load_reward_model accepts torch_dtype parameter name
+        dtype=dtype,
         use_gradient_checkpointing=True,
     )
     # Move model to device - the base model inside already has the correct dtype

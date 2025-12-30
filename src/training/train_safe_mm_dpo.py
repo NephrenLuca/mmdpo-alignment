@@ -430,8 +430,8 @@ def run_training(
         tokenizer_name=cfg.harmless_rm_path,
         max_length=safe_max_length,
     )
-    helpful_rm, _ = load_reward_model(helpful_rm_cfg, torch_dtype=dtype, use_gradient_checkpointing=False)
-    harmless_rm, _ = load_reward_model(harmless_rm_cfg, torch_dtype=dtype, use_gradient_checkpointing=False)
+    helpful_rm, _ = load_reward_model(helpful_rm_cfg, dtype=dtype, use_gradient_checkpointing=False)
+    harmless_rm, _ = load_reward_model(harmless_rm_cfg, dtype=dtype, use_gradient_checkpointing=False)
     helpful_rm.to(device).eval()
     harmless_rm.to(device).eval()
     for p in helpful_rm.parameters():

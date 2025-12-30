@@ -219,7 +219,7 @@ python3 scripts/compare_safety_evaluation.py \
     --baseline_model_path models/base/Mistral-7B-v0.1 \
     --aligned_model_paths models/aligned/epoch_1 models/aligned/epoch_2 \
     --harmless_rm_path models/harmless_rm \
-    --benchmark_path data/benchmarks/safety_benchmark.jsonl \
+    --benchmark_path data/benchmarks/safety_benchmark_medium.jsonl \
     --output_dir results/safety_comparison \
     --max_new_tokens 256 \
     --safety_threshold 0.0

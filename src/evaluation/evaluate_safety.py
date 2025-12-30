@@ -269,7 +269,7 @@ def main():
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
-        torch_dtype=dtype,
+        dtype=dtype,
         device_map="auto" if device.type == "cuda" else None,
     )
     if device.type == "cpu":
@@ -284,7 +284,7 @@ def main():
         tokenizer_name=str(args.harmless_rm_path),
         max_length=512,
     )
-    harmless_rm, _ = load_reward_model(rm_cfg, torch_dtype=dtype, use_gradient_checkpointing=False)
+    harmless_rm, _ = load_reward_model(rm_cfg, dtype=dtype, use_gradient_checkpointing=False)
     harmless_rm.to(device).eval()
     print("✓ Harmless RM loaded")
     

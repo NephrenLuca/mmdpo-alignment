@@ -65,7 +65,7 @@ class RewardModel(nn.Module):
 
 def load_reward_model(
     cfg: RewardModelConfig,
-    torch_dtype: Optional[torch.dtype] = None,
+    dtype: Optional[torch.dtype] = None,
     use_gradient_checkpointing: bool = True,
 ) -> tuple[RewardModel, PreTrainedTokenizerBase]:
     """
@@ -73,7 +73,7 @@ def load_reward_model(
 
     - base_model_path: path or HF id for the base LM
     - tokenizer_name: optional, if None we reuse base_model_path
-    - torch_dtype: optional dtype for model weights (e.g., torch.bfloat16)
+    - dtype: optional dtype for model weights (e.g., torch.bfloat16)
     - use_gradient_checkpointing: enable gradient checkpointing to save memory
     - use_lora: if True, use LoRA for parameter-efficient fine-tuning
     """
@@ -88,11 +88,11 @@ def load_reward_model(
         tokenizer.pad_token = tokenizer.eos_token
 
     # Auto-select dtype for memory efficiency if not specified
-    if torch_dtype is None and torch.cuda.is_available():
+    if dtype is None and torch.cuda.is_available():
         if torch.cuda.is_bf16_supported():
-            torch_dtype = torch.bfloat16
+            dtype = torch.bfloat16
         else:
-            torch_dtype = torch.float16
+            dtype = torch.float16
 
     # Make sure the model itself also has pad_token_id set, otherwise some
     # transformer utilities will raise when batch_size > 1.
@@ -100,8 +100,8 @@ def load_reward_model(
         "num_labels": 1,
         "pad_token_id": tokenizer.pad_token_id,
     }
-    if torch_dtype is not None:
-        load_kwargs["dtype"] = torch_dtype  # Use dtype instead of deprecated torch_dtype
+    if dtype is not None:
+        load_kwargs["dtype"] = dtype
 
     base_model = AutoModelForSequenceClassification.from_pretrained(
         cfg.base_model_path,
