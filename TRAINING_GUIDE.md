@@ -181,6 +181,7 @@ bash scripts/train_rm_distributed.sh harmless 8 --background
 - 模型保存在 `models/harmless_rm/`
 - 日志保存在 `logs/training/rm/harmless_*.log`
 
+
 ### 验证训练结果
 
 训练完成后，检查模型文件：
