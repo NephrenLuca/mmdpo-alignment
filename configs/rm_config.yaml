@@ -36,7 +36,7 @@ batch_size: 4            # LoRA模式下可以使用更大的batch_size
 max_length: 512          # LoRA模式下可以使用更长的序列
 gradient_accumulation_steps: 2  # LoRA模式下需要较少的梯度累积
 
-num_epochs: 3            # 初次跑通建议 1 epoch
+num_epochs: 4            # 对于harmless RM，建议4-5个epoch以获得更好的准确率
 weight_decay: 0.01
 max_grad_norm: 1.0
 
