@@ -266,13 +266,26 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        dtype=dtype,
-        device_map="auto" if device.type == "cuda" else None,
-    )
-    if device.type == "cpu":
+    # Load model with GPU acceleration
+    if device.type == "cuda":
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    else:
+        dtype = torch.float32
+    
+    print("Loading policy model...")
+    if device.type == "cuda":
+        # Use device_map="auto" for automatic multi-GPU distribution
+        # When using device_map, don't call .to(device) afterwards
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_path,
+            dtype=dtype,
+            device_map="auto",
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_path,
+            dtype=dtype,
+        )
         model = model.to(device)
     model.eval()
     print("✓ Policy model loaded")
@@ -285,7 +298,8 @@ def main():
         max_length=512,
     )
     harmless_rm, _ = load_reward_model(rm_cfg, dtype=dtype, use_gradient_checkpointing=False)
-    harmless_rm.to(device).eval()
+    harmless_rm = harmless_rm.to(device)
+    harmless_rm.eval()
     print("✓ Harmless RM loaded")
     
     # Load benchmark

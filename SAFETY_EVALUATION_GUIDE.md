@@ -21,6 +21,16 @@
 - **对比原始模型**：比较 MMDPO 训练后的模型与原始 Mistral 模型的安全性改进
 - **量化改进效果**：计算安全率提升、平均分数变化等指标
 
+### GPU 加速支持
+
+**评估脚本默认使用 GPU 加速**（如果可用）：
+- 自动检测 CUDA 可用性
+- 使用 `device_map="auto"` 自动分布模型到多个GPU
+- 使用半精度（bfloat16/float16）减少显存占用
+- 如果 GPU 不可用，自动回退到 CPU
+
+**推荐使用 GPU 进行评估**，速度比 CPU 快 10-100 倍。
+
 ### 评估指标
 
 **安全率（Safety Rate）**：模型拒绝生成有害内容的比例
@@ -146,15 +156,47 @@ EOF
 
 ### 基本命令
 
-评估单个模型：
+评估单个模型（**默认使用 GPU 加速**）：
 
 ```bash
-python -m src.evaluation.evaluate_safety \
+python3 -m src.evaluation.evaluate_safety \
     --model_path models/aligned/epoch_2 \
     --harmless_rm_path models/harmless_rm \
     --benchmark_path data/benchmarks/safety_benchmark.jsonl \
     --output_path results/safety_evaluation.json
 ```
+
+### GPU 加速说明
+
+**默认行为**：
+- 如果检测到 CUDA 可用，自动使用 GPU（`--device cuda`）
+- 使用 `device_map="auto"` 自动将模型分布到多个GPU（如果有多个GPU）
+- 使用半精度（bfloat16/float16）减少显存占用
+
+**显式指定设备**：
+
+```bash
+# 使用 GPU（推荐，速度快）
+python3 -m src.evaluation.evaluate_safety \
+    --model_path models/aligned/epoch_2 \
+    --harmless_rm_path models/harmless_rm \
+    --benchmark_path data/benchmarks/safety_benchmark.jsonl \
+    --output_path results/safety_evaluation.json \
+    --device cuda
+
+# 使用 CPU（不推荐，速度慢）
+python3 -m src.evaluation.evaluate_safety \
+    --model_path models/aligned/epoch_2 \
+    --harmless_rm_path models/harmless_rm \
+    --benchmark_path data/benchmarks/safety_benchmark.jsonl \
+    --output_path results/safety_evaluation.json \
+    --device cpu
+```
+
+**性能对比**：
+- **GPU（单卡）**：评估 500 个提示约需 5-15 分钟
+- **GPU（多卡，自动分布）**：评估 500 个提示约需 3-10 分钟
+- **CPU**：评估 500 个提示约需 1-3 小时（不推荐）
 
 ### 参数说明
 
@@ -166,7 +208,7 @@ python -m src.evaluation.evaluate_safety \
 | `--output_path` | ✅ | 评估结果保存路径 | - |
 | `--max_new_tokens` | ❌ | 每个响应的最大生成长度 | 256 |
 | `--safety_threshold` | ❌ | 安全分数阈值（>阈值视为安全） | 0.0 |
-| `--device` | ❌ | 运行设备（cuda/cpu） | cuda（如果可用） |
+| `--device` | ❌ | 运行设备（cuda/cpu） | 自动检测（推荐使用GPU，速度快10-100倍） |
 
 ---
 
@@ -213,7 +255,7 @@ python3 scripts/prepare_safety_benchmark.py \
     --prioritize_unsafe \
     --balance_by_category
 
-# 2. 运行对比评估
+# 2. 运行对比评估（自动使用GPU加速）
 echo "Running safety comparison evaluation..."
 python3 scripts/compare_safety_evaluation.py \
     --baseline_model_path models/base/Mistral-7B-v0.1 \
@@ -222,7 +264,8 @@ python3 scripts/compare_safety_evaluation.py \
     --benchmark_path data/benchmarks/safety_benchmark_medium.jsonl \
     --output_dir results/safety_comparison \
     --max_new_tokens 256 \
-    --safety_threshold 0.0
+    --safety_threshold 0.0 \
+    --device cuda  # 可选：显式指定GPU（默认会自动检测）
 
 # 3. 查看对比报告
 echo "Viewing comparison report..."
@@ -480,8 +523,10 @@ ls -lh models/harmless_rm/
 
 **解决**：
 1. 减小 `--max_new_tokens`（如从 256 改为 128）
-2. 使用 CPU：`--device cpu`（会很慢）
-3. 分批处理基准数据
+2. 使用 CPU：`--device cpu`（会很慢，不推荐）
+3. 使用 `device_map="auto"` 自动分布到多个GPU（已默认启用）
+4. 分批处理基准数据
+5. 如果只有单GPU，可以减小模型加载时的batch size
 
 ### 问题 3：安全率异常低/高
 
