@@ -517,16 +517,54 @@ ls -lh models/harmless_rm/
 # 确保路径正确
 ```
 
-### 问题 2：显存不足
+### 问题 2：模型加载卡住
+
+**现象**：在 "Loading policy model..." 或 "Evaluating: models/..." 后卡住
+
+**可能原因和解决**：
+
+1. **`device_map="auto"` 在多GPU环境下可能卡住**
+   - 解决：脚本已优化为使用 `device_map="cuda:0"`（单GPU），更稳定
+   - 如果仍卡住，可以尝试显式指定单GPU：`CUDA_VISIBLE_DEVICES=0 python3 ...`
+
+2. **模型文件很大，首次加载需要时间**
+   - Mistral-7B 约 14GB，加载可能需要 1-3 分钟
+   - 检查磁盘 I/O：`iostat -x 1` 或 `iotop`
+   - 耐心等待，首次加载会较慢
+
+3. **显存不足导致卡住**
+   - 检查显存：`nvidia-smi`
+   - 解决：关闭其他占用显存的进程
+   - 或使用 CPU：`--device cpu`（会很慢）
+
+4. **模型路径错误或文件损坏**
+   - 检查路径：`ls -lh models/base/Mistral-7B-v0.1/`
+   - 确认文件完整性
+
+**诊断命令**：
+```bash
+# 检查GPU状态
+nvidia-smi
+
+# 检查进程状态
+ps aux | grep evaluate_safety
+
+# 检查磁盘I/O
+iostat -x 1
+
+# 使用单GPU运行（如果多GPU有问题）
+CUDA_VISIBLE_DEVICES=0 python3 -m src.evaluation.evaluate_safety ...
+```
+
+### 问题 3：显存不足
 
 **错误**：`CUDA out of memory`
 
 **解决**：
 1. 减小 `--max_new_tokens`（如从 256 改为 128）
 2. 使用 CPU：`--device cpu`（会很慢，不推荐）
-3. 使用 `device_map="auto"` 自动分布到多个GPU（已默认启用）
+3. 关闭其他占用显存的进程
 4. 分批处理基准数据
-5. 如果只有单GPU，可以减小模型加载时的batch size
 
 ### 问题 3：安全率异常低/高
 

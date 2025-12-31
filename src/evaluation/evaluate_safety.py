@@ -273,25 +273,42 @@ def main():
         dtype = torch.float32
     
     print("Loading policy model...")
+    print(f"  Model path: {args.model_path}")
+    print(f"  Device: {device}")
+    print(f"  Dtype: {dtype}")
+    
     if device.type == "cuda":
-        # Use device_map="auto" for automatic multi-GPU distribution
-        # When using device_map, don't call .to(device) afterwards
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_path,
-            dtype=dtype,
-            device_map="auto",
-        )
+        # For evaluation, use single GPU (device_map="cuda:0") instead of "auto"
+        # "auto" can cause issues in evaluation scripts (deadlock, slow loading)
+        # If you have multiple GPUs and want to use them, specify device_map explicitly
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_path,
+                dtype=dtype,
+                device_map="cuda:0",  # Use single GPU for evaluation (more stable)
+                # Alternative: device_map="auto" for multi-GPU, but may be slower
+            )
+            print("  Using device_map='cuda:0' for single GPU")
+        except Exception as e:
+            print(f"  Warning: device_map failed ({e}), falling back to manual .to(device)")
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_path,
+                dtype=dtype,
+            )
+            model = model.to(device)
     else:
         model = AutoModelForCausalLM.from_pretrained(
             args.model_path,
             dtype=dtype,
         )
         model = model.to(device)
+    
     model.eval()
     print("✓ Policy model loaded")
     
     # Load Harmless RM
     print("Loading Harmless RM...")
+    print(f"  RM path: {args.harmless_rm_path}")
     rm_cfg = RewardModelConfig(
         base_model_path=str(args.harmless_rm_path),
         tokenizer_name=str(args.harmless_rm_path),
