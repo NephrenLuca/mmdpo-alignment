@@ -133,11 +133,11 @@ def build_preference_pairs(
             continue
 
         pair_record = {
-            "prompt": prompt,
-            "chosen_response": chosen,
-            "rejected_response": rejected,
-            "dimension": dimension,
-        }
+                "prompt": prompt,
+                "chosen_response": chosen,
+                "rejected_response": rejected,
+                "dimension": dimension,
+            }
         
         # 如果是harmless维度且存在safety labels，添加到记录中
         if dimension == "harmless" and safety_labels is not None:

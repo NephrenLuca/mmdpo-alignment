@@ -265,7 +265,7 @@ def train_one_epoch(
 
         # Pairwise ranking loss (论文公式 5 或 6 的第一项)
         loss = preference_loss(scores_c, scores_r)
-        
+
         # Classification loss (论文公式 6 的第二项，仅用于Cost Model)
         if classification_loss_weight > 0.0 and "safety_labels" in batch:
             safety_labels_chosen = batch["safety_labels"]["chosen"].to(device, non_blocking=True)
@@ -524,7 +524,7 @@ def main() -> None:
 
     best_val_loss = float("inf")
     if (not is_ddp) or rank == 0:
-        args.output_dir.mkdir(parents=True, exist_ok=True)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, train_cfg.num_epochs + 1):
         if is_ddp:
@@ -545,12 +545,12 @@ def main() -> None:
         metrics = evaluate(model, val_loader, device, is_ddp=is_ddp)
 
         if (not is_ddp) or rank == 0:
-            print(
-                f"[{args.task}] Epoch {epoch}/{train_cfg.num_epochs} "
-                f"train_loss={train_loss:.4f} "
-                f"val_loss={metrics['val_loss']:.4f} "
-                f"val_acc={metrics['val_accuracy']:.4f}"
-            )
+        print(
+            f"[{args.task}] Epoch {epoch}/{train_cfg.num_epochs} "
+            f"train_loss={train_loss:.4f} "
+            f"val_loss={metrics['val_loss']:.4f} "
+            f"val_acc={metrics['val_accuracy']:.4f}"
+        )
 
         # Save best checkpoint (only on rank 0)
         if ((not is_ddp) or rank == 0) and metrics["val_loss"] < best_val_loss:

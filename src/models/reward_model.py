@@ -103,14 +103,60 @@ def load_reward_model(
     if dtype is not None:
         load_kwargs["dtype"] = dtype
 
-    # Try to load the model from the specified path
-    # If it fails (e.g., missing model_type in config), try loading from base model
-    try:
-        base_model = AutoModelForSequenceClassification.from_pretrained(
-            cfg.base_model_path,
-            **load_kwargs,
-        )
-    except (ValueError, OSError) as e:
+    # Check if this is a LoRA adapter (has adapter_config.json but no config.json)
+    base_path = Path(cfg.base_model_path)
+    adapter_config_path = base_path / "adapter_config.json"
+    config_path = base_path / "config.json"
+    is_lora_adapter = adapter_config_path.exists() and not config_path.exists()
+    
+    if is_lora_adapter:
+        # Load LoRA adapter
+        try:
+            from peft import PeftModel
+            import json
+            
+            # Read adapter config to get base model path
+            with open(adapter_config_path, 'r') as f:
+                adapter_config = json.load(f)
+            base_model_path_from_adapter = adapter_config.get("base_model_name_or_path")
+            
+            if not base_model_path_from_adapter:
+                raise ValueError(
+                    f"LoRA adapter at {cfg.base_model_path} does not specify base_model_name_or_path. "
+                    f"Cannot load adapter without base model."
+                )
+            
+            # Load base model first
+            base_model = AutoModelForSequenceClassification.from_pretrained(
+                base_model_path_from_adapter,
+                **load_kwargs,
+            )
+            # Load adapter
+            base_model = PeftModel.from_pretrained(
+                base_model,
+                cfg.base_model_path,
+            )
+            # Merge adapter into base model for inference
+            base_model = base_model.merge_and_unload()
+        except ImportError:
+            raise ImportError(
+                "LoRA adapter detected but 'peft' package is not installed. "
+                "Install it with: pip install peft"
+            )
+        except Exception as e:
+            raise ValueError(
+                f"Failed to load LoRA adapter from {cfg.base_model_path}. "
+                f"Error: {e}"
+            ) from e
+    else:
+        # Try to load the model from the specified path
+        # If it fails (e.g., missing model_type in config), try loading from base model
+        try:
+            base_model = AutoModelForSequenceClassification.from_pretrained(
+                cfg.base_model_path,
+                **load_kwargs,
+            )
+        except (ValueError, OSError) as e:
         # If loading fails, it might be because:
         # 1. The saved model is missing model_type in config.json
         # 2. The path points to a LoRA adapter without base model
@@ -127,36 +173,17 @@ def load_reward_model(
             try:
                 with open(config_path, 'r') as f:
                     config = json.load(f)
-                # If model_type is missing or incorrect, try to infer from architecture
-                needs_fix = False
-                if "model_type" not in config:
-                    needs_fix = True
-                elif config.get("model_type") == "align":  # Common error
-                    needs_fix = True
-                
-                if needs_fix and "architectures" in config:
+                # If model_type is missing, try to infer from architecture
+                if "model_type" not in config and "architectures" in config:
                     arch = config["architectures"][0] if config["architectures"] else None
                     # Map common architectures to model_type
                     if arch and "Mistral" in arch:
                         config["model_type"] = "mistral"
                     elif arch and "Llama" in arch:
                         config["model_type"] = "llama"
-                    elif arch and "GPT" in arch:
-                        config["model_type"] = "gpt2"
-                    else:
-                        # Default to mistral for Mistral-based models
-                        config["model_type"] = "mistral"
-                    
-                    # Backup original config
-                    backup_path = config_path.with_suffix('.json.bak')
-                    with open(backup_path, 'w') as f:
-                        json.dump(config, f, indent=2)
-                    
                     # Save the fixed config
                     with open(config_path, 'w') as f:
                         json.dump(config, f, indent=2)
-                    print(f"✓ Auto-fixed model_type in {cfg.base_model_path}: {config['model_type']}")
-                    
                     # Retry loading
                     base_model = AutoModelForSequenceClassification.from_pretrained(
                         cfg.base_model_path,

@@ -281,50 +281,97 @@ def main():
     import json
     model_path = Path(args.model_path)
     config_path = model_path / "config.json"
+    adapter_config_path = model_path / "adapter_config.json"
     
-    if config_path.exists():
+    # Check if this is a LoRA adapter (has adapter_config.json but no config.json)
+    is_lora_adapter = adapter_config_path.exists() and not config_path.exists()
+    base_model_path_for_adapter = None
+    
+    if is_lora_adapter:
+        print("  Detected LoRA adapter (adapter_config.json found)")
+        try:
+            with open(adapter_config_path, 'r') as f:
+                adapter_config = json.load(f)
+            # PEFT adapter config contains base_model_name_or_path
+            base_model_path_for_adapter = adapter_config.get("base_model_name_or_path")
+            if base_model_path_for_adapter:
+                print(f"  Base model path from adapter: {base_model_path_for_adapter}")
+                # Try to load config from base model
+                base_config_path = Path(base_model_path_for_adapter) / "config.json"
+                if base_config_path.exists():
+                    with open(base_config_path, 'r') as f:
+                        base_config = json.load(f)
+                    model_type = base_config.get("model_type", "unknown")
+                    print(f"  Detected model_type from base model: {model_type}")
+                else:
+                    print(f"  Warning: Base model config not found at {base_config_path}")
+            else:
+                print("  Warning: Could not find base_model_name_or_path in adapter_config.json")
+        except Exception as e:
+            print(f"  Warning: Could not read adapter_config.json: {e}")
+    elif config_path.exists():
         try:
             with open(config_path, 'r') as f:
                 config = json.load(f)
             model_type = config.get("model_type", "unknown")
             print(f"  Detected model_type: {model_type}")
             
-            # Validate and auto-fix model_type if needed
-            if model_type == "align" or model_type == "unknown":
-                # Try to auto-fix
-                architectures = config.get("architectures", [])
-                if architectures:
-                    arch = architectures[0]
-                    if "Mistral" in arch:
-                        correct_type = "mistral"
-                    elif "Llama" in arch:
-                        correct_type = "llama"
-                    elif "GPT" in arch:
-                        correct_type = "gpt2"
-                    else:
-                        correct_type = "mistral"  # Default for Mistral-based models
-                    
-                    # Backup and fix
-                    backup_path = config_path.with_suffix('.json.bak')
-                    with open(backup_path, 'w') as f:
-                        json.dump(config, f, indent=2)
-                    
-                    config["model_type"] = correct_type
-                    with open(config_path, 'w') as f:
-                        json.dump(config, f, indent=2)
-                    print(f"  ✓ Auto-fixed model_type: {model_type} -> {correct_type}")
-                    model_type = correct_type
-                elif model_type == "align":
+            # Validate model_type is appropriate for causal LM
+            if model_type not in ["mistral", "llama", "gpt2", "gpt_neox", "bloom", "opt", "falcon", "mpt", "qwen2", "gemma", "phi", "olmo"]:
+                if model_type == "align":
                     raise ValueError(
-                        f"Model at {args.model_path} has incorrect model_type='align' and cannot auto-fix. "
-                        f"Please run: python3 scripts/fix_model_config.py {args.model_path} --type policy --expected-model-type mistral"
+                        f"Model at {args.model_path} has incorrect model_type='align'. "
+                        f"This suggests the model was saved incorrectly or the path is wrong. "
+                        f"Please check the model path and ensure it points to a causal language model."
                     )
-            elif model_type not in ["mistral", "llama", "gpt2", "gpt_neox", "bloom", "opt", "falcon", "mpt", "qwen2", "gemma", "phi", "olmo"]:
                 print(f"  Warning: model_type '{model_type}' may not be standard for causal LM")
         except Exception as e:
             print(f"  Warning: Could not read config.json: {e}")
+    else:
+        print(f"  Warning: Neither config.json nor adapter_config.json found in {model_path}")
     
-    if device.type == "cuda":
+    # Load model - handle both full models and LoRA adapters
+    if is_lora_adapter:
+        # For LoRA adapter, need to load base model first, then load adapter
+        try:
+            from peft import PeftModel
+            print("  Loading base model and LoRA adapter...")
+            if base_model_path_for_adapter and Path(base_model_path_for_adapter).exists():
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    base_model_path_for_adapter,
+                    dtype=dtype,
+                    device_map="cuda:0" if device.type == "cuda" else None,
+                    trust_remote_code=False,
+                )
+                model = PeftModel.from_pretrained(
+                    base_model,
+                    args.model_path,
+                    device_map="cuda:0" if device.type == "cuda" else None,
+                )
+                # Merge adapter into base model for faster inference
+                model = model.merge_and_unload()
+                print("  LoRA adapter loaded and merged")
+            else:
+                raise ValueError(
+                    f"Cannot load LoRA adapter: base model path '{base_model_path_for_adapter}' "
+                    f"from adapter_config.json does not exist. "
+                    f"Please ensure the base model is available."
+                )
+        except ImportError:
+            raise ImportError(
+                "LoRA adapter detected but 'peft' package is not installed. "
+                "Install it with: pip install peft"
+            )
+        except Exception as e:
+            raise ValueError(
+                f"Failed to load LoRA adapter from {args.model_path}. "
+                f"Error: {e}\n\n"
+                f"Please ensure:\n"
+                f"1. Base model path in adapter_config.json is correct\n"
+                f"2. Base model exists and is accessible\n"
+                f"3. PEFT library is installed: pip install peft"
+            ) from e
+    elif device.type == "cuda":
         # For evaluation, use single GPU (device_map="cuda:0") instead of "auto"
         # "auto" can cause issues in evaluation scripts (deadlock, slow loading)
         # If you have multiple GPUs and want to use them, specify device_map explicitly
