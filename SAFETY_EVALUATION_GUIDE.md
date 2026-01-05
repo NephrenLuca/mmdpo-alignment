@@ -634,20 +634,31 @@ ls -lh models/harmless_rm/
 
 **解决方法**：
 
-使用修复脚本自动修复配置：
+**方法 1：使用修复脚本（推荐）**
 
 ```bash
-# 修复 Reward Model 配置
-python3 scripts/fix_model_config.py models/harmless_rm --type reward --base-model-path models/base/Mistral-7B-v0.1
+# 修复 Reward Model 配置（缺少 model_type）
+python3 scripts/fix_model_config.py models/harmless_rm \
+    --type reward \
+    --base-model-path models/base/Mistral-7B-v0.1
 
-# 修复 Policy Model 配置（如 epoch_1）
-python3 scripts/fix_model_config.py models/aligned/epoch_1 --type policy --expected-model-type mistral
+# 修复 Policy Model 配置（错误的 model_type='align'）
+python3 scripts/fix_model_config.py models/aligned/epoch_2 \
+    --type policy \
+    --expected-model-type mistral
 
 # 批量修复所有 epoch 模型
 for epoch_dir in models/aligned/epoch_*; do
-    python3 scripts/fix_model_config.py "$epoch_dir" --type policy --expected-model-type mistral
+    echo "Fixing $epoch_dir..."
+    python3 scripts/fix_model_config.py "$epoch_dir" \
+        --type policy \
+        --expected-model-type mistral
 done
 ```
+
+**方法 2：自动修复（代码已包含自动修复逻辑）**
+
+代码已包含自动修复逻辑，但为了确保修复成功，建议先运行修复脚本。如果自动修复失败，会提示运行修复脚本。
 
 **手动修复**（如果脚本无法修复）：
 

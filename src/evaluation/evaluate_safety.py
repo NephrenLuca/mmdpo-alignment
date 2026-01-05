@@ -289,14 +289,37 @@ def main():
             model_type = config.get("model_type", "unknown")
             print(f"  Detected model_type: {model_type}")
             
-            # Validate model_type is appropriate for causal LM
-            if model_type not in ["mistral", "llama", "gpt2", "gpt_neox", "bloom", "opt", "falcon", "mpt", "qwen2", "gemma", "phi", "olmo"]:
-                if model_type == "align":
+            # Validate and auto-fix model_type if needed
+            if model_type == "align" or model_type == "unknown":
+                # Try to auto-fix
+                architectures = config.get("architectures", [])
+                if architectures:
+                    arch = architectures[0]
+                    if "Mistral" in arch:
+                        correct_type = "mistral"
+                    elif "Llama" in arch:
+                        correct_type = "llama"
+                    elif "GPT" in arch:
+                        correct_type = "gpt2"
+                    else:
+                        correct_type = "mistral"  # Default for Mistral-based models
+                    
+                    # Backup and fix
+                    backup_path = config_path.with_suffix('.json.bak')
+                    with open(backup_path, 'w') as f:
+                        json.dump(config, f, indent=2)
+                    
+                    config["model_type"] = correct_type
+                    with open(config_path, 'w') as f:
+                        json.dump(config, f, indent=2)
+                    print(f"  ✓ Auto-fixed model_type: {model_type} -> {correct_type}")
+                    model_type = correct_type
+                elif model_type == "align":
                     raise ValueError(
-                        f"Model at {args.model_path} has incorrect model_type='align'. "
-                        f"This suggests the model was saved incorrectly or the path is wrong. "
-                        f"Please check the model path and ensure it points to a causal language model."
+                        f"Model at {args.model_path} has incorrect model_type='align' and cannot auto-fix. "
+                        f"Please run: python3 scripts/fix_model_config.py {args.model_path} --type policy --expected-model-type mistral"
                     )
+            elif model_type not in ["mistral", "llama", "gpt2", "gpt_neox", "bloom", "opt", "falcon", "mpt", "qwen2", "gemma", "phi", "olmo"]:
                 print(f"  Warning: model_type '{model_type}' may not be standard for causal LM")
         except Exception as e:
             print(f"  Warning: Could not read config.json: {e}")
