@@ -278,7 +278,6 @@ def main():
     print(f"  Dtype: {dtype}")
     
     # Check if model path exists and has valid config
-    from pathlib import Path
     import json
     model_path = Path(args.model_path)
     config_path = model_path / "config.json"
