@@ -103,10 +103,60 @@ def load_reward_model(
     if dtype is not None:
         load_kwargs["dtype"] = dtype
 
-    base_model = AutoModelForSequenceClassification.from_pretrained(
-        cfg.base_model_path,
-        **load_kwargs,
-    )
+    # Try to load the model from the specified path
+    # If it fails (e.g., missing model_type in config), try loading from base model
+    try:
+        base_model = AutoModelForSequenceClassification.from_pretrained(
+            cfg.base_model_path,
+            **load_kwargs,
+        )
+    except (ValueError, OSError) as e:
+        # If loading fails, it might be because:
+        # 1. The saved model is missing model_type in config.json
+        # 2. The path points to a LoRA adapter without base model
+        # Try to load from base model path if different
+        import os
+        from pathlib import Path
+        
+        base_path = Path(cfg.base_model_path)
+        # Check if this is a saved reward model (has config.json but might be missing model_type)
+        config_path = base_path / "config.json"
+        if config_path.exists():
+            # Try to fix the config by loading and re-saving with model_type
+            import json
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                # If model_type is missing, try to infer from architecture
+                if "model_type" not in config and "architectures" in config:
+                    arch = config["architectures"][0] if config["architectures"] else None
+                    # Map common architectures to model_type
+                    if arch and "Mistral" in arch:
+                        config["model_type"] = "mistral"
+                    elif arch and "Llama" in arch:
+                        config["model_type"] = "llama"
+                    # Save the fixed config
+                    with open(config_path, 'w') as f:
+                        json.dump(config, f, indent=2)
+                    # Retry loading
+                    base_model = AutoModelForSequenceClassification.from_pretrained(
+                        cfg.base_model_path,
+                        **load_kwargs,
+                    )
+                else:
+                    raise e
+            except Exception:
+                # If fixing config fails, re-raise original error
+                raise ValueError(
+                    f"Failed to load reward model from {cfg.base_model_path}. "
+                    f"Original error: {e}. "
+                    f"Please ensure the model was saved correctly with model_type in config.json."
+                ) from e
+        else:
+            raise ValueError(
+                f"Model path {cfg.base_model_path} does not exist or is not a valid model directory. "
+                f"Original error: {e}"
+            ) from e
     # Double‑check on the loaded config as well.
     if base_model.config.pad_token_id is None:
         base_model.config.pad_token_id = tokenizer.pad_token_id

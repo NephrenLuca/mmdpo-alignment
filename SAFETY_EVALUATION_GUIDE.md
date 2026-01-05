@@ -1,24 +1,70 @@
 # 安全性评估指南
 
-本指南说明如何评估模型的安全性，特别是对比评估 MMDPO 训练完成的模型与原始 Mistral 模型。
+本指南说明如何评估模型的安全性，特别是对比评估 MMDPO 训练完成的模型与原始 Mistral-7B 模型。
+
+**所有模型均基于 Mistral-7B 架构**，包括基线模型、对齐模型和奖励模型。
 
 ## 目录
 
-1. [概述](#概述)
-2. [准备评估数据](#准备评估数据)
-3. [单模型评估](#单模型评估)
-4. [对比评估（推荐）](#对比评估推荐)
-5. [理解评估结果](#理解评估结果)
-6. [示例和最佳实践](#示例和最佳实践)
+1. [快速开始](#快速开始)
+2. [概述](#概述)
+3. [准备评估数据](#准备评估数据)
+4. [单模型评估](#单模型评估)
+5. [对比评估（推荐）](#对比评估推荐)
+6. [理解评估结果](#理解评估结果)
+7. [示例和最佳实践](#示例和最佳实践)
+8. [故障排除](#故障排除)
+
+---
+
+## 快速开始
+
+### 对比评估 epoch_2 与 base 模型（3 步完成）
+
+```bash
+# 步骤 1：准备测试数据集（如果还没有）
+python3 scripts/prepare_safety_benchmark.py \
+    --raw_data_paths data/raw/pku_saferlhf_test.jsonl data/raw/pku_saferlhf_train.jsonl \
+    --output_path data/benchmarks/safety_benchmark_medium.jsonl \
+    --max_prompts 500 \
+    --prioritize_unsafe \
+    --balance_by_category
+
+# 步骤 2：运行对比评估（自动使用 GPU 加速）
+python3 scripts/compare_safety_evaluation.py \
+    --baseline_model_path models/base/Mistral-7B-v0.1 \
+    --aligned_model_paths models/aligned/epoch_2 \
+    --harmless_rm_path models/harmless_rm \
+    --benchmark_path data/benchmarks/safety_benchmark_medium.jsonl \
+    --output_dir results/safety_comparison
+
+# 步骤 3：查看对比结果
+cat results/safety_comparison/comparison_report.json | python3 -m json.tool
+```
+
+**预期输出**：
+- 基线模型（Mistral-7B）的安全率
+- epoch_2 模型的安全率
+- 安全率改进百分比
+- 平均安全分数对比
 
 ---
 
 ## 概述
 
+### 模型说明
+
+**所有模型均基于 Mistral-7B 架构**：
+- **基线模型**：`models/base/Mistral-7B-v0.1`（原始 Mistral-7B 模型）
+- **对齐模型**：`models/aligned/epoch_1`, `models/aligned/epoch_2` 等（MMDPO 训练后的 Mistral-7B 模型）
+- **奖励模型**：`models/helpful_rm`, `models/harmless_rm`（基于 Mistral-7B 训练的奖励模型）
+
+所有模型共享相同的架构和 tokenizer，确保评估结果的可比性。
+
 ### 评估目标
 
 - **评估训练后的模型安全性**：使用 BeaverTails Safety Benchmark 测试模型对有害提示的响应
-- **对比原始模型**：比较 MMDPO 训练后的模型与原始 Mistral 模型的安全性改进
+- **对比原始模型**：比较 MMDPO 训练后的模型与原始 Mistral-7B 模型的安全性改进
 - **量化改进效果**：计算安全率提升、平均分数变化等指标
 
 ### GPU 加速支持
@@ -158,12 +204,22 @@ EOF
 
 评估单个模型（**默认使用 GPU 加速**）：
 
+**评估对齐模型（如 epoch_2）**：
 ```bash
 python3 -m src.evaluation.evaluate_safety \
     --model_path models/aligned/epoch_2 \
     --harmless_rm_path models/harmless_rm \
-    --benchmark_path data/benchmarks/safety_benchmark.jsonl \
-    --output_path results/safety_evaluation.json
+    --benchmark_path data/benchmarks/safety_benchmark_medium.jsonl \
+    --output_path results/safety_evaluation_epoch2.json
+```
+
+**评估基线模型（Mistral-7B）**：
+```bash
+python3 -m src.evaluation.evaluate_safety \
+    --model_path models/base/Mistral-7B-v0.1 \
+    --harmless_rm_path models/harmless_rm \
+    --benchmark_path data/benchmarks/safety_benchmark_medium.jsonl \
+    --output_path results/safety_evaluation_baseline.json
 ```
 
 ### GPU 加速说明
@@ -202,8 +258,8 @@ python3 -m src.evaluation.evaluate_safety \
 
 | 参数 | 必需 | 说明 | 默认值 |
 |------|------|------|--------|
-| `--model_path` | ✅ | 训练好的策略模型路径 | - |
-| `--harmless_rm_path` | ✅ | Harmless RM 模型路径 | - |
+| `--model_path` | ✅ | 训练好的策略模型路径（Mistral-7B 模型，如 `models/aligned/epoch_2` 或 `models/base/Mistral-7B-v0.1`） | - |
+| `--harmless_rm_path` | ✅ | Harmless RM 模型路径（基于 Mistral-7B 训练的奖励模型，如 `models/harmless_rm`） | - |
 | `--benchmark_path` | ✅ | 安全基准文件路径 | - |
 | `--output_path` | ✅ | 评估结果保存路径 | - |
 | `--max_new_tokens` | ❌ | 每个响应的最大生成长度 | 256 |
@@ -214,14 +270,51 @@ python3 -m src.evaluation.evaluate_safety \
 
 ## 对比评估（推荐）
 
+### 快速开始：对比 epoch_2 与 base 模型
+
+**最简单的对比评估命令**（推荐用于快速测试）：
+
+```bash
+# 使用从本地数据生成的测试集，对比 epoch_2 和 base 模型
+python3 scripts/compare_safety_evaluation.py \
+    --baseline_model_path models/base/Mistral-7B-v0.1 \
+    --aligned_model_paths models/aligned/epoch_2 \
+    --harmless_rm_path models/harmless_rm \
+    --benchmark_path data/benchmarks/safety_benchmark_medium.jsonl \
+    --output_dir results/safety_comparison
+```
+
+**完整流程**（包含数据准备）：
+
+```bash
+# 1. 准备测试数据集（如果还没有）
+python3 scripts/prepare_safety_benchmark.py \
+    --raw_data_paths data/raw/pku_saferlhf_test.jsonl data/raw/pku_saferlhf_train.jsonl \
+    --output_path data/benchmarks/safety_benchmark_medium.jsonl \
+    --max_prompts 500 \
+    --prioritize_unsafe \
+    --balance_by_category
+
+# 2. 运行对比评估
+python3 scripts/compare_safety_evaluation.py \
+    --baseline_model_path models/base/Mistral-7B-v0.1 \
+    --aligned_model_paths models/aligned/epoch_2 \
+    --harmless_rm_path models/harmless_rm \
+    --benchmark_path data/benchmarks/safety_benchmark_medium.jsonl \
+    --output_dir results/safety_comparison
+
+# 3. 查看结果
+cat results/safety_comparison/comparison_report.json | python3 -m json.tool
+```
+
 ### 使用对比评估脚本
 
 **推荐使用对比评估脚本**，可以一次性评估多个模型并生成对比报告：
 
 ```bash
-python scripts/compare_safety_evaluation.py \
+python3 scripts/compare_safety_evaluation.py \
     --baseline_model_path models/base/Mistral-7B-v0.1 \
-    --aligned_model_paths models/aligned/epoch_2 \
+    --aligned_model_paths models/aligned/epoch_1 models/aligned/epoch_2 \
     --harmless_rm_path models/harmless_rm \
     --benchmark_path data/benchmarks/safety_benchmark.jsonl \
     --output_dir results/safety_comparison
@@ -231,8 +324,8 @@ python scripts/compare_safety_evaluation.py \
 
 | 参数 | 必需 | 说明 |
 |------|------|------|
-| `--baseline_model_path` | ✅ | 原始 Mistral 模型路径 |
-| `--aligned_model_paths` | ✅ | MMDPO 训练后的模型路径（可多个） |
+| `--baseline_model_path` | ✅ | 原始 Mistral-7B 模型路径（如 `models/base/Mistral-7B-v0.1`） |
+| `--aligned_model_paths` | ✅ | MMDPO 训练后的 Mistral-7B 模型路径（可多个，如 `models/aligned/epoch_2`） |
 | `--harmless_rm_path` | ✅ | Harmless RM 模型路径 |
 | `--benchmark_path` | ✅ | 安全基准文件路径 |
 | `--output_dir` | ❌ | 结果保存目录 | `results/safety_comparison` |
@@ -408,7 +501,19 @@ cat results/safety_comparison/comparison_report.json | python3 -m json.tool
 
 ## 示例和最佳实践
 
-### 示例 1：评估 MMDPO 训练后的模型
+### 示例 1：对比评估 epoch_2 与 base 模型（推荐）
+
+```bash
+# 最简单的对比：只评估 epoch_2 与 base 模型
+python3 scripts/compare_safety_evaluation.py \
+    --baseline_model_path models/base/Mistral-7B-v0.1 \
+    --aligned_model_paths models/aligned/epoch_2 \
+    --harmless_rm_path models/harmless_rm \
+    --benchmark_path data/benchmarks/safety_benchmark_medium.jsonl \
+    --output_dir results/safety_comparison
+```
+
+### 示例 2：评估多个 epoch 的模型
 
 ```bash
 # 评估所有 epoch 的模型并与基线对比
@@ -418,11 +523,11 @@ python3 scripts/compare_safety_evaluation.py \
         models/aligned/epoch_1 \
         models/aligned/epoch_2 \
     --harmless_rm_path models/harmless_rm \
-    --benchmark_path data/benchmarks/safety_benchmark.jsonl \
+    --benchmark_path data/benchmarks/safety_benchmark_medium.jsonl \
     --output_dir results/safety_comparison
 ```
 
-### 示例 2：查看对比结果
+### 示例 3：查看对比结果
 
 ```bash
 # 查看对比报告
@@ -443,7 +548,7 @@ for r in unsafe[:5]:
 "
 ```
 
-### 示例 3：批量评估脚本
+### 示例 4：批量评估脚本
 
 ```bash
 #!/bin/bash
@@ -517,7 +622,55 @@ ls -lh models/harmless_rm/
 # 确保路径正确
 ```
 
-### 问题 2：模型加载卡住
+### 问题 2：模型配置错误
+
+**错误 1**：`ValueError: Unrecognized model in models/harmless_rm. Should have a 'model_type' key in its config.json`
+
+**错误 2**：`ValueError: Unrecognized configuration class <class 'transformers.models.align.configuration_align.AlignConfig'> for this kind of AutoModel: AutoModelForCausalLM`
+
+**原因**：
+- Reward Model 或 Policy Model 的 `config.json` 缺少 `model_type` 字段
+- 或者 `model_type` 被错误设置（如设置为 'align' 而不是 'mistral'）
+
+**解决方法**：
+
+使用修复脚本自动修复配置：
+
+```bash
+# 修复 Reward Model 配置
+python3 scripts/fix_model_config.py models/harmless_rm --type reward --base-model-path models/base/Mistral-7B-v0.1
+
+# 修复 Policy Model 配置（如 epoch_1）
+python3 scripts/fix_model_config.py models/aligned/epoch_1 --type policy --expected-model-type mistral
+
+# 批量修复所有 epoch 模型
+for epoch_dir in models/aligned/epoch_*; do
+    python3 scripts/fix_model_config.py "$epoch_dir" --type policy --expected-model-type mistral
+done
+```
+
+**手动修复**（如果脚本无法修复）：
+
+```bash
+# 1. 备份原配置
+cp models/harmless_rm/config.json models/harmless_rm/config.json.bak
+
+# 2. 编辑 config.json，添加或修正 model_type
+# 对于 Reward Model（基于 Mistral）：
+#   "model_type": "mistral"
+# 对于 Policy Model（基于 Mistral）：
+#   "model_type": "mistral"  （不能是 "align"）
+
+# 3. 验证修复
+python3 -c "
+import json
+with open('models/harmless_rm/config.json') as f:
+    config = json.load(f)
+    print(f'model_type: {config.get(\"model_type\")}')
+"
+```
+
+### 问题 3：模型加载卡住
 
 **现象**：在 "Loading policy model..." 或 "Evaluating: models/..." 后卡住
 
@@ -556,7 +709,7 @@ iostat -x 1
 CUDA_VISIBLE_DEVICES=0 python3 -m src.evaluation.evaluate_safety ...
 ```
 
-### 问题 3：显存不足
+### 问题 4：显存不足
 
 **错误**：`CUDA out of memory`
 

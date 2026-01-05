@@ -277,6 +277,31 @@ def main():
     print(f"  Device: {device}")
     print(f"  Dtype: {dtype}")
     
+    # Check if model path exists and has valid config
+    from pathlib import Path
+    import json
+    model_path = Path(args.model_path)
+    config_path = model_path / "config.json"
+    
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            model_type = config.get("model_type", "unknown")
+            print(f"  Detected model_type: {model_type}")
+            
+            # Validate model_type is appropriate for causal LM
+            if model_type not in ["mistral", "llama", "gpt2", "gpt_neox", "bloom", "opt", "falcon", "mpt", "qwen2", "gemma", "phi", "olmo"]:
+                if model_type == "align":
+                    raise ValueError(
+                        f"Model at {args.model_path} has incorrect model_type='align'. "
+                        f"This suggests the model was saved incorrectly or the path is wrong. "
+                        f"Please check the model path and ensure it points to a causal language model."
+                    )
+                print(f"  Warning: model_type '{model_type}' may not be standard for causal LM")
+        except Exception as e:
+            print(f"  Warning: Could not read config.json: {e}")
+    
     if device.type == "cuda":
         # For evaluation, use single GPU (device_map="cuda:0") instead of "auto"
         # "auto" can cause issues in evaluation scripts (deadlock, slow loading)
@@ -287,19 +312,44 @@ def main():
                 dtype=dtype,
                 device_map="cuda:0",  # Use single GPU for evaluation (more stable)
                 # Alternative: device_map="auto" for multi-GPU, but may be slower
+                trust_remote_code=False,  # Don't trust remote code for safety
             )
             print("  Using device_map='cuda:0' for single GPU")
+        except ValueError as e:
+            if "Unrecognized configuration class" in str(e) or "Unrecognized model" in str(e):
+                raise ValueError(
+                    f"Failed to load model from {args.model_path}. "
+                    f"The model configuration is invalid or corrupted. "
+                    f"Error: {e}\n\n"
+                    f"Possible causes:\n"
+                    f"1. Model was saved incorrectly (wrong model_type in config.json)\n"
+                    f"2. Model path points to wrong directory\n"
+                    f"3. Model files are corrupted\n\n"
+                    f"Please check:\n"
+                    f"- Model path exists: {model_path.exists()}\n"
+                    f"- Config file exists: {config_path.exists()}\n"
+                    f"- Model type in config.json matches a causal LM"
+                ) from e
+            print(f"  Warning: device_map failed ({e}), falling back to manual .to(device)")
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_path,
+                dtype=dtype,
+                trust_remote_code=False,
+            )
+            model = model.to(device)
         except Exception as e:
             print(f"  Warning: device_map failed ({e}), falling back to manual .to(device)")
             model = AutoModelForCausalLM.from_pretrained(
                 args.model_path,
                 dtype=dtype,
+                trust_remote_code=False,
             )
             model = model.to(device)
     else:
         model = AutoModelForCausalLM.from_pretrained(
             args.model_path,
             dtype=dtype,
+            trust_remote_code=False,
         )
         model = model.to(device)
     

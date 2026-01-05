@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Compare safety evaluation results between baseline model and aligned models.
+Compare safety evaluation results between baseline Mistral-7B model and aligned models.
 
 This script:
-1. Evaluates baseline Mistral model
-2. Evaluates MMDPO-aligned models (each epoch)
+1. Evaluates baseline Mistral-7B model (models/base/Mistral-7B-v0.1)
+2. Evaluates MMDPO-aligned models (e.g., models/aligned/epoch_2)
 3. Generates a comparison report
+
+All models are based on Mistral-7B architecture.
 """
 
 from __future__ import annotations
@@ -80,12 +82,19 @@ def generate_comparison_report(
             "category_stats": result.get("category_stats", {}),
         }
     
-    # Find baseline model (usually the first one or named "baseline")
+    # Find baseline model (usually named "baseline" or contains "base"/"mistral")
     baseline_name = None
     for name in results.keys():
-        if "baseline" in name.lower() or "mistral" in name.lower() or "base" in name.lower():
+        if name == "baseline" or "baseline" in name.lower():
             baseline_name = name
             break
+    # Fallback: look for "base" or "mistral" in name
+    if not baseline_name:
+        for name in results.keys():
+            if "base" in name.lower() or "mistral" in name.lower():
+                baseline_name = name
+                break
+    # Last resort: use first model
     if not baseline_name and results:
         baseline_name = list(results.keys())[0]
     
@@ -166,7 +175,7 @@ def main():
         "--baseline_model_path",
         type=Path,
         required=True,
-        help="Path to baseline Mistral model (e.g., models/base/Mistral-7B-v0.1)",
+        help="Path to baseline Mistral-7B model (e.g., models/base/Mistral-7B-v0.1)",
     )
     parser.add_argument(
         "--aligned_model_paths",
