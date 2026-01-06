@@ -84,7 +84,7 @@
 
 #### 三、训练日志可视化与参数曲线分析
 
-本项目使用 `train_20251229_175835.log` 生成了 Safe‑MM‑DPO 训练过程中关键参数的演化曲线，包含 $\text{loss}_H$、$\text{loss}_S$、$\lambda$ 与 $J_C$ 四条曲线，结果如下图所示：
+本项目生成了 Safe‑MM‑DPO 训练过程中关键参数的演化曲线，包含 $\text{loss}_H$、$\text{loss}_S$、$\lambda$ 与 $J_C$ 四条曲线，结果如下图所示：
 
 ![Safe-MM-DPO 训练过程中 loss_H / loss_S / λ / J_C 的变化曲线](results/figures/safe_mm_dpo_training_curves.png)
 
@@ -189,13 +189,13 @@ flowchart TD
          --task harmless \
          --output_dir models/harmless_rm
      ```
-  ```
    
 4. **Safe‑MM‑DPO 策略训练**  
    
 - 使用 `src/training/train_safe_mm_dpo.py` 与 `configs/dpo_config.yaml`，在 Mistral‑7B 基座上进行 2 个 epoch 的 Safe‑MM‑DPO 训练，输出如 `models/aligned/epoch_1`, `models/aligned/epoch_2` 等对齐模型目录。
   
 5. **安全性评估与对比**  
+   
    - 单模型评估可使用：
      ```bash
      python3 -m src.evaluation.evaluate_safety \
@@ -203,7 +203,8 @@ flowchart TD
          --harmless_rm_path models/harmless_rm \
          --benchmark_path data/benchmarks/safety_benchmark_medium.jsonl \
          --output_path results/safety_evaluation_epoch2.json
-  ```
+     ```
+   
    - 基线与对齐模型对比评估可使用：
      ```bash
      python3 scripts/compare_safety_evaluation.py \
@@ -213,8 +214,8 @@ flowchart TD
          --benchmark_path data/benchmarks/safety_benchmark_medium.jsonl \
          --output_dir results/safety_comparison
      ```
-
-通过以上流程，本项目在一定的算力和时间限制下，完成了从数据构造、RM 训练、Safe‑MM‑DPO 策略对齐到安全性定量评估的完整闭环。实验结果验证了将 MM‑DPO 的动态重加权与 Safe‑RLHF 的成本约束思想相结合的有效性，也展示了 LoRA‑Safe‑MM‑DPO 在大模型对齐任务中的实用价值。
+   
+   通过以上流程，本项目在一定的算力和时间限制下，完成了从数据构造、RM 训练、Safe‑MM‑DPO 策略对齐到安全性定量评估的完整闭环。实验结果验证了将 MM‑DPO 的动态重加权与 Safe‑RLHF 的成本约束思想相结合的有效性，也展示了 LoRA‑Safe‑MM‑DPO 在大模型对齐任务中的实用价值。
 
 #### 七、未来改进方向
 
